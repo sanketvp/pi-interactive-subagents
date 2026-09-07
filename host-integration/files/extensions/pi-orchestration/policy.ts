@@ -1,6 +1,6 @@
 import { hostname } from 'node:os';
 
-export const CONTRACT_REVISION = '2026-09-07d';
+export const CONTRACT_REVISION = '2026-09-07e';
 
 // Accepted 2026-09-07 (live trial, sid 01a07d3f-2a3a-711e-9cd2-0b22c4b2d4ed and
 // 01a07d44-2364-7214-a244-b78cd3d4ad8b): the pi-interactive-subagents `subagent`
@@ -33,5 +33,3 @@ export function isCoordinator(env: NodeJS.ProcessEnv = process.env): boolean {
   return !env.PI_SUBAGENT_ID;
 }
 
-// Surgical edits the coordinator may make per turn before it must delegate.
-export const COORDINATOR_WRITE_BUDGET = 3;

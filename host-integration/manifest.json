@@ -16,11 +16,11 @@
     },
     {
       "path": "extensions/pi-orchestration/index.ts",
-      "sha256": "b3d1749d40e2d74a19c344a90904f59f30a46ea47e6ea8bd2c0fc55c4aa02b10"
+      "sha256": "208fd4d144ef33a3f2d61d54d12fc5f8da5436282c6e0bf39e2d9de7a9b30f4c"
     },
     {
       "path": "extensions/pi-orchestration/policy.ts",
-      "sha256": "33d783e7490d1b602e3ee9be09c35b62b7d07ec15e1cb0094282a6a1fff8ca2b"
+      "sha256": "fd16f448a62a3b9b11b486283439bc362eebfe823122416542d0f9338d80e8e9"
     },
     {
       "path": "extensions/anthropic-pool/auth-flow.ts",

@@ -2,7 +2,7 @@ import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { CONTRACT_REVISION, COORDINATOR_WRITE_BUDGET, isCoordinator, isMbpCodingHost, launchGate } from './policy.js';
+import { CONTRACT_REVISION, isCoordinator, isMbpCodingHost, launchGate } from './policy.js';
 
 // Coordinator enforcement (2026-09-07c, user directive): the session model is a
 // COORDINATOR. It may do a few surgical edits per turn, but substantive
@@ -16,8 +16,7 @@ export default function (pi: ExtensionAPI) {
   let render: (() => void) | undefined;
   let writesThisTurn = 0;
   let dispatchesThisTurn = 0;
-  let blockedThisTurn = 0;
-  const stopTimer = () => { if (timer) clearInterval(timer); timer = undefined; };
+    const stopTimer = () => { if (timer) clearInterval(timer); timer = undefined; };
 
   pi.on('before_agent_start', (event) => {
     let contract: string;
@@ -27,25 +26,17 @@ export default function (pi: ExtensionAPI) {
       ? event.systemPrompt : `${event.systemPrompt}\n\n${contract}` };
   });
 
-  pi.on('agent_start', () => { writesThisTurn = 0; dispatchesThisTurn = 0; blockedThisTurn = 0; render?.(); });
+  pi.on('agent_start', () => { writesThisTurn = 0; dispatchesThisTurn = 0; render?.(); });
 
-  // Mechanical budget: coordinator write/edit calls beyond the budget are
-  // blocked with an actionable reason. Workers (PI_SUBAGENT_ID set) are exempt.
+  // Visibility only (user directive 2026-09-07): count dispatches and edits
+  // for the widget. Tool calls are NEVER blocked or budgeted here; the only
+  // budget in this harness is the per-session SUBAGENT invocation limit,
+  // enforced (and user-adjustable) inside the subagent tool itself.
   pi.on('tool_call', (event) => {
     if (!coordinator) return;
-    if (event.toolName === 'subagent') { dispatchesThisTurn += 1; render?.(); return; }
-    if (event.toolName !== 'write' && event.toolName !== 'edit') return;
-    writesThisTurn += 1;
-    if (writesThisTurn <= COORDINATOR_WRITE_BUDGET) { render?.(); return; }
-    blockedThisTurn += 1; render?.();
-    return {
-      block: true,
-      reason:
-        `Coordinator write budget exhausted (${COORDINATOR_WRITE_BUDGET} write/edit calls per user request). ` +
-        `This is substantive implementation: dispatch it with the subagent tool — agent "implementer" (Grok 4.6) ` +
-        `or "implementer-gpt" (GPT-5.6 Sol), or "worker" (Sonnet 5) for a surgical slice — then have "verifier" check it. ` +
-        `Do not retry the edit inline. Do not use standalone CLIs.`,
-    };
+    if (event.toolName === 'subagent') dispatchesThisTurn += 1;
+    else if (event.toolName === 'write' || event.toolName === 'edit') writesThisTurn += 1;
+    render?.();
   });
 
   pi.on('session_start', (_event, ctx) => {
@@ -56,8 +47,7 @@ export default function (pi: ExtensionAPI) {
       const rows = [...active.values()].map(({ name, started }) =>
         `${name}: running ${Math.floor((Date.now() - started) / 1000)}s`);
       if (coordinator) {
-        rows.unshift(`swarm: ${dispatchesThisTurn} dispatched · edits ${Math.min(writesThisTurn, COORDINATOR_WRITE_BUDGET)}/${COORDINATOR_WRITE_BUDGET}` +
-          (blockedThisTurn ? ` · ${blockedThisTurn} blocked → delegate` : ''));
+        rows.unshift(`swarm: ${dispatchesThisTurn} dispatched · ${writesThisTurn} direct edits this request`);
       }
       ctx.ui.setWidget('orchestration-activity', rows.length ? rows : undefined);
     };
@@ -83,7 +73,7 @@ export default function (pi: ExtensionAPI) {
     description: 'Show exact session identity and current orchestration acceptance gate',
     handler: async (_args, ctx) => {
       const gate = launchGate();
-      ctx.ui.notify(`sid:${ctx.sessionManager.getSessionId()}\n${ctx.model?.provider}/${ctx.model?.id}\nrole: ${coordinator ? `coordinator (write budget ${COORDINATOR_WRITE_BUDGET}/request)` : 'worker'}\n${gate.reason}`, gate.ready ? 'info' : 'warning');
+      ctx.ui.notify(`sid:${ctx.sessionManager.getSessionId()}\n${ctx.model?.provider}/${ctx.model?.id}\nrole: ${coordinator ? 'coordinator' : 'worker'}\n${gate.reason}`, gate.ready ? 'info' : 'warning');
     },
   });
 }
