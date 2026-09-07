@@ -7,8 +7,8 @@ import {randomUUID} from 'node:crypto';
 import {execFileSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 import {writeCompletion,validateCompletion,writeStartupReceipt} from '../pi-extension/subagents/completion.mjs';
-import {loadRegistry,writeRegistry,RegistryValidationError} from '../pi-extension/subagents/registry.ts';
-import {persistOutcomePending,persistDeliveryAttempted} from '../pi-extension/subagents/lifecycle.ts';
+import {loadRegistry,writeRegistry,RegistryValidationError,effectiveInvocationLimit} from '../pi-extension/subagents/registry.ts';
+import {persistOutcomePending,persistDeliveryAttempted,assertCanLaunch} from '../pi-extension/subagents/lifecycle.ts';
 import {setLifecycleAdapter,createDefaultAdapter} from '../pi-extension/subagents/adapter.ts';
 
 const cli=fileURLToPath(new URL('../pi-extension/subagents/completion.mjs',import.meta.url));
@@ -83,7 +83,7 @@ test('startup receipt requires exact session/model fields',()=>{
  assert.equal(existsSync(env.PI_SUBAGENT_COMPLETION_FILE+'.start'),true);
 });
 
-test('strict registry validation fail-closed; extra keys preserved; invocations 0..12',()=>{
+test('strict registry validation fail-closed; extra keys preserved; invocation limit is per-session adjustable',()=>{
  setLifecycleAdapter(createDefaultAdapter());
  const root=mkdtempSync(join(tmpdir(),'pi-registry-'));
  const path=join(root,'workers.json');
@@ -124,7 +124,21 @@ test('strict registry validation fail-closed; extra keys preserved; invocations 
  const invalid=loadRegistry(path);
  assert.equal(invalid.status,'invalid');
  assert.equal(readFileSync(path,'utf8'),'not JSON');
- assert.throws(()=>writeRegistry(path,13,[worker]),RegistryValidationError);
+ // Default limit 12 is enforced at LAUNCH time, not storage time: a raised
+ // limit must be storable, and invocationLimit is validated.
+ writeRegistry(path,13,[worker],{invocationLimit:20});
+ const raised=loadRegistry(path);
+ assert.equal(raised.status,'ok');
+ assert.equal(effectiveInvocationLimit(raised.registry),20);
+ assert.doesNotThrow(()=>assertCanLaunch({...raised.registry,workers:[]}));
+ assert.throws(()=>assertCanLaunch({version:1,invocations:12,workers:[]}),/Invocation budget reached \(12\/12/);
+ assert.throws(()=>assertCanLaunch({version:1,invocations:20,workers:[],invocationLimit:20}),/Invocation budget reached/);
+ assert.doesNotThrow(()=>assertCanLaunch({version:1,invocations:500,workers:[],invocationLimit:null}),'null removes the limit');
+ assert.equal(effectiveInvocationLimit({invocationLimit:null}),null);
+ assert.equal(effectiveInvocationLimit({}),12);
+ assert.throws(()=>writeRegistry(path,1,[worker],{invocationLimit:0}),RegistryValidationError);
+ assert.throws(()=>writeRegistry(path,1,[worker],{invocationLimit:'lots'}),RegistryValidationError);
+ assert.throws(()=>writeRegistry(path,100_001,[worker],{invocationLimit:null}),RegistryValidationError);
 });
 
 test('outbox persists pending before attempted and never treats outcome as capacity release',()=>{

@@ -5,7 +5,21 @@ import { getLifecycleAdapter, type LifecycleFs } from "./adapter.ts";
 
 export const REGISTRY_VERSION = 1;
 export const MAX_LIVE_RESOURCES = 4;
-export const MAX_CHILD_INVOCATIONS = 12;
+export const MAX_CHILD_INVOCATIONS = 12; // default per-lifecycle budget
+export const HARD_INVOCATION_CEILING = 100_000; // sanity bound for stored counters when the limit is raised/removed
+
+/**
+ * Effective invocation limit for a registry. `invocationLimit` is a per-session
+ * override persisted in workers.json: a positive integer raises/lowers the
+ * budget, `null` removes the limit for that session permanently, absent means
+ * the default. Set only through the user-confirmed /subagent-limit flow.
+ */
+export function effectiveInvocationLimit(registry: { invocationLimit?: unknown } | null | undefined): number | null {
+  const v = registry?.invocationLimit;
+  if (v === null) return null;
+  if (Number.isInteger(v) && (v as number) > 0) return v as number;
+  return MAX_CHILD_INVOCATIONS;
+}
 export const MAX_PATH_LENGTH = 4096;
 
 export const RESOURCE_STATES = [
@@ -149,7 +163,7 @@ function validateAttemptRecord(worker: unknown, index: number): AttemptRecord {
   if (!isUuid(w.attemptId)) fail("attemptId");
   if (!isUuid(w.parentSessionId)) fail("parentSessionId");
   if (w.piSessionId !== null && !isUuid(w.piSessionId)) fail("piSessionId");
-  if (!Number.isInteger(w.invocation) || (w.invocation as number) < 1 || (w.invocation as number) > MAX_CHILD_INVOCATIONS) {
+  if (!Number.isInteger(w.invocation) || (w.invocation as number) < 1 || (w.invocation as number) > HARD_INVOCATION_CEILING) {
     fail("invocation");
   }
   if (!isUuid(w.completionToken)) fail("completionToken");
@@ -198,8 +212,12 @@ export function validateRegistry(data: unknown): WorkerRegistry {
   if (!data || typeof data !== "object") throw new RegistryValidationError("Registry is not an object");
   const raw = data as Record<string, unknown>;
   if (raw.version !== REGISTRY_VERSION) throw new RegistryValidationError(`Unsupported registry version: ${String(raw.version)}`);
-  if (!Number.isInteger(raw.invocations) || (raw.invocations as number) < 0 || (raw.invocations as number) > MAX_CHILD_INVOCATIONS) {
-    throw new RegistryValidationError(`invocations must be an integer 0..${MAX_CHILD_INVOCATIONS}`);
+  if (!Number.isInteger(raw.invocations) || (raw.invocations as number) < 0 || (raw.invocations as number) > HARD_INVOCATION_CEILING) {
+    throw new RegistryValidationError(`invocations must be an integer 0..${HARD_INVOCATION_CEILING}`);
+  }
+  if (raw.invocationLimit !== undefined && raw.invocationLimit !== null &&
+      (!Number.isInteger(raw.invocationLimit) || (raw.invocationLimit as number) < 1 || (raw.invocationLimit as number) > HARD_INVOCATION_CEILING)) {
+    throw new RegistryValidationError("invocationLimit must be null (no limit) or a positive integer");
   }
   if (!Array.isArray(raw.workers)) throw new RegistryValidationError("workers must be an array");
   const workers = raw.workers.map((worker, index) => validateAttemptRecord(worker, index));
@@ -281,8 +299,8 @@ function persistableWorker(worker: AttemptRecord): Record<string, unknown> {
 }
 
 export function writeRegistry(path: string, invocations: number, workers: AttemptRecord[], extra: Record<string, unknown> = {}, file = fsNow()): void {
-  if (!Number.isInteger(invocations) || invocations < 0 || invocations > MAX_CHILD_INVOCATIONS) {
-    throw new RegistryValidationError(`invocations must be an integer 0..${MAX_CHILD_INVOCATIONS}`);
+  if (!Number.isInteger(invocations) || invocations < 0 || invocations > HARD_INVOCATION_CEILING) {
+    throw new RegistryValidationError(`invocations must be an integer 0..${HARD_INVOCATION_CEILING}`);
   }
   const records = workers.map(persistableWorker);
   const payload: WorkerRegistry = {

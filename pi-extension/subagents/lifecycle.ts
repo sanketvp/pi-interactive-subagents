@@ -13,6 +13,7 @@ import {
   LIVE_RESOURCE_STATES,
   MAX_CHILD_INVOCATIONS,
   MAX_LIVE_RESOURCES,
+  effectiveInvocationLimit,
   countLiveResources,
   loadRegistry,
   outcomeDigest,
@@ -72,8 +73,9 @@ export function assertCanLaunch(registry: WorkerRegistry): void {
   if (countLiveResources(registry.workers) >= MAX_LIVE_RESOURCES) {
     throw new Error(`Four-worker concurrency limit reached (including retained workers)`);
   }
-  if (registry.invocations >= MAX_CHILD_INVOCATIONS) {
-    throw new Error("Twelve-invocation lifecycle budget reached; explicit new lifecycle required");
+  const limit = effectiveInvocationLimit(registry);
+  if (limit !== null && registry.invocations >= limit) {
+    throw new Error(`Invocation budget reached (${registry.invocations}/${limit} this session). Ask the user: /subagent-limit raises or removes it.`);
   }
 }
 
@@ -551,7 +553,8 @@ export function diagnoseText(
     lines.push(`File bytes preserved (${load.raw.length} bytes).`);
   } else {
     lines.push(`Registry status: ${load.status}`);
-    lines.push(`Invocations: ${load.status === "missing" ? 0 : load.registry.invocations}/${MAX_CHILD_INVOCATIONS}`);
+    const lim = load.status === "missing" ? MAX_CHILD_INVOCATIONS : effectiveInvocationLimit(load.registry);
+    lines.push(`Invocations: ${load.status === "missing" ? 0 : load.registry.invocations}/${lim === null ? "unlimited (removed for this session)" : lim}`);
     lines.push(`Live resources: ${countLiveResources(records)}/${MAX_LIVE_RESOURCES}`);
   }
   for (const record of records) {

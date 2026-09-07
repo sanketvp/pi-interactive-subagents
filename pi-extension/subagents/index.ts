@@ -9,6 +9,7 @@ import {
   type AttemptRecord,
   type WorkerRegistry,
   countLiveResources,
+  effectiveInvocationLimit,
   loadRegistry,
 } from "./registry.ts";
 import {
@@ -578,10 +579,65 @@ function persistWorkers() {
   if (!registryFile || !registryReady) return;
   persistRegistry(registryFile, { ...workerRegistry, invocations: invocationCount });
 }
-async function withLaunchReservation<T>(launch: () => Promise<T>): Promise<T> {
+/**
+ * Per-session invocation limit control. The default budget (12) can be raised,
+ * lowered, or removed for THIS session only, and only through an explicit
+ * user answer in the TUI — never by the model. Persisted in workers.json so it
+ * survives /reload and resume.
+ */
+function currentLimitLabel(): string {
+  const lim = effectiveInvocationLimit(workerRegistry);
+  return lim === null ? "no limit (removed for this session)" : `${lim}`;
+}
+function setInvocationLimit(next: number | null): void {
+  workerRegistry = { ...workerRegistry, invocationLimit: next };
+  persistWorkers();
+  updateWidget();
+}
+async function promptInvocationLimit(ctx: ExtensionContext, why: string): Promise<boolean> {
+  if (ctx.mode !== "tui" || !ctx.ui?.select) return false;
+  const used = invocationCount;
+  const choice = await ctx.ui.select(
+    `${why}\nUsed ${used} of ${currentLimitLabel()} subagent invocations this session. What do you want to do?`,
+    [
+      "Raise by 4",
+      "Raise by 12",
+      "Set a specific limit…",
+      "Remove the limit for this session (permanent)",
+      "Keep the limit — do not launch",
+    ],
+  );
+  if (!choice || choice.startsWith("Keep")) return false;
+  const lim = effectiveInvocationLimit(workerRegistry);
+  const base = lim === null ? used : Math.max(lim, used);
+  if (choice === "Raise by 4") setInvocationLimit(base + 4);
+  else if (choice === "Raise by 12") setInvocationLimit(base + 12);
+  else if (choice.startsWith("Remove")) {
+    const sure = await ctx.ui.confirm("Remove the invocation limit for this session?", "Permanent for this session (until you set a new limit with /subagent-limit).");
+    if (!sure) return false;
+    setInvocationLimit(null);
+  } else {
+    const raw = await ctx.ui.input("New invocation limit for this session", `> ${used}`);
+    const n = Number(raw);
+    if (!Number.isInteger(n) || n <= used) { ctx.ui.notify(`Limit must be an integer greater than ${used}; unchanged.`, "warning"); return false; }
+    setInvocationLimit(n);
+  }
+  ctx.ui.notify(`Subagent invocation limit for this session: ${currentLimitLabel()}`, "info");
+  return true;
+}
+async function withLaunchReservation<T>(launch: () => Promise<T>, ctx?: ExtensionContext): Promise<T> {
   if (!registryReady) throw new Error("Worker registry is not initialized or failed validation; refusing launch");
   if (process.env.PI_SUBAGENT_ID) throw new Error("Nested worker spawning is disabled");
-  assertCanLaunch({ ...workerRegistry, invocations: invocationCount });
+  try {
+    assertCanLaunch({ ...workerRegistry, invocations: invocationCount });
+  } catch (err: any) {
+    const msg = String(err?.message ?? err);
+    // Only the invocation budget is user-adjustable; the live-worker cap is not.
+    if (!/Invocation budget reached/.test(msg) || !ctx) throw err;
+    const raised = await promptInvocationLimit(ctx, "The subagent invocation budget for this session is used up.");
+    if (!raised) throw new Error(`${msg} The user chose to keep the limit; do not retry the launch.`);
+    assertCanLaunch({ ...workerRegistry, invocations: invocationCount });
+  }
   return await launch();
 }
 
@@ -1174,7 +1230,8 @@ function startWidgetRefresh() {
  * Call watchSubagent() on the returned object to observe completion.
  */
 async function launchSubagent(...args: Parameters<typeof launchSubagentImpl>): Promise<RunningSubagent> {
-  return withLaunchReservation(() => launchSubagentImpl(...args));
+  // args[1] is the ExtensionContext for the launching tool call.
+  return withLaunchReservation(() => launchSubagentImpl(...args), args[1] as ExtensionContext | undefined);
 }
 async function launchSubagentImpl(
   params: typeof SubagentParams.static,
@@ -2276,6 +2333,14 @@ export default function subagentsExtension(pi: ExtensionAPI) {
     },
   });
 
+  pi.registerCommand("subagent-limit", {
+    description: "Show or change this session's subagent invocation limit (raise, set, or remove permanently) — asks you to choose",
+    handler: async (_args, ctx) => {
+      if (!registryReady) { ctx.ui.notify("Worker registry not ready.", "error"); return; }
+      const changed = await promptInvocationLimit(ctx, `Subagent invocation limit for this session is ${currentLimitLabel()}.`);
+      if (!changed) ctx.ui.notify(`Limit unchanged: ${currentLimitLabel()} (used ${invocationCount}).`, "info");
+    },
+  });
   pi.registerCommand("subagents-diagnose", {
     description: "Show worker registry diagnostics and pending deliveries",
     handler: async (_args, ctx) => {
