@@ -1,6 +1,6 @@
 import { hostname } from 'node:os';
 
-export const CONTRACT_REVISION = '2026-09-07b';
+export const CONTRACT_REVISION = '2026-09-07c';
 
 // Accepted 2026-09-07 (live trial, sid 01a07d3f-2a3a-711e-9cd2-0b22c4b2d4ed and
 // 01a07d44-2364-7214-a244-b78cd3d4ad8b): the pi-interactive-subagents `subagent`
@@ -26,3 +26,12 @@ export function launchGate(env: NodeJS.ProcessEnv = process.env) {
   const ready = Boolean(env.TMUX);
   return { revision: CONTRACT_REVISION, ready, reason: ready ? LAUNCH_READY : LAUNCH_BLOCKER } as const;
 }
+
+// Coordinator = an interactive Pi that is NOT itself a subagent worker.
+// Workers carry PI_SUBAGENT_ID from the launcher and are exempt from the budget.
+export function isCoordinator(env: NodeJS.ProcessEnv = process.env): boolean {
+  return !env.PI_SUBAGENT_ID;
+}
+
+// Surgical edits the coordinator may make per turn before it must delegate.
+export const COORDINATOR_WRITE_BUDGET = 3;
