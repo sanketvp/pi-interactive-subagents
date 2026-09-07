@@ -20,7 +20,7 @@
     },
     {
       "path": "extensions/pi-orchestration/policy.ts",
-      "sha256": "8470d5bfbd55e1f3a23fdca961519e91a6393176e28a08a6ac47e0ca7283f9bf"
+      "sha256": "33d783e7490d1b602e3ee9be09c35b62b7d07ec15e1cb0094282a6a1fff8ca2b"
     },
     {
       "path": "extensions/anthropic-pool/auth-flow.ts",

@@ -355,13 +355,17 @@ export default function (pi: ExtensionAPI) {
     description:
       "Call this tool when you have completed your task. " +
       "It will close this session and return your results to the main session. " +
-      "Your LAST assistant message before calling this becomes the summary returned to the caller.",
-    parameters: Type.Object({}),
-    async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
+      "Pass `summary` with what you accomplished (results, outputs, file paths, test exit codes). " +
+      "If omitted, your LAST assistant text message before calling this becomes the summary returned to the caller.",
+    parameters: Type.Object({
+      summary: Type.Optional(Type.String({ description: "What you accomplished: results, outputs, paths, test exit codes. Returned verbatim to the caller." })),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const sessionFile = process.env.PI_SUBAGENT_SESSION;
       recorder.subagentDone();
       if (sessionFile) {
-        writeChildCompletion({ type: "done", piSessionId: establishedPiSessionId ?? currentPiSessionId(ctx) }, ctx);
+        const summary = typeof params?.summary === "string" && params.summary.trim() ? params.summary.trim() : undefined;
+        writeChildCompletion({ type: "done", ...(summary ? { summary } : {}), piSessionId: establishedPiSessionId ?? currentPiSessionId(ctx) }, ctx);
       }
       ctx.shutdown();
       return {

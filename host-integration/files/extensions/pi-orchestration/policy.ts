@@ -1,6 +1,6 @@
 import { hostname } from 'node:os';
 
-export const CONTRACT_REVISION = '2026-09-07c';
+export const CONTRACT_REVISION = '2026-09-07d';
 
 // Accepted 2026-09-07 (live trial, sid 01a07d3f-2a3a-711e-9cd2-0b22c4b2d4ed and
 // 01a07d44-2364-7214-a244-b78cd3d4ad8b): the pi-interactive-subagents `subagent`

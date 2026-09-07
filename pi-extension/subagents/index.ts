@@ -75,6 +75,7 @@ import {
 
 import {
   findLastAssistantMessage,
+  findLastToolResultText,
   getNewEntries,
   seedSubagentSessionFile,
 } from "./session.ts";
@@ -1419,11 +1420,17 @@ function deliverAuthenticatedOutcome(
   if (!watcherIsCurrent(running) || record.deliveryState !== "pending") return record;
   const elapsed = Math.floor((getLifecycleAdapter().now() - record.createdAt) / 1000);
   const sessionFile = record.sessionFile;
+  // Summary precedence: explicit `summary` from subagent_done -> last assistant
+  // text -> last tool result (models like K3/GLM often call subagent_done
+  // straight after a tool call without writing prose) -> placeholder.
+  const explicitSummary = typeof data.summary === "string" && data.summary.trim() ? data.summary.trim() : null;
+  const entries = !data.errorMessage && existsSync(sessionFile) ? getNewEntries(sessionFile, 0) : [];
   const summary = data.errorMessage
     ? `Subagent error: ${data.errorMessage}`
-    : existsSync(sessionFile)
-      ? findLastAssistantMessage(getNewEntries(sessionFile, 0)) ?? "Sub-agent exited without output"
-      : "Sub-agent exited without output";
+    : explicitSummary
+      ?? findLastAssistantMessage(entries)
+      ?? (findLastToolResultText(entries) ? `(no final message; last tool output)\n${findLastToolResultText(entries)}` : null)
+      ?? "Sub-agent exited without output";
   if (data.type === "ping") {
     pi.sendMessage(
       {
@@ -2081,7 +2088,15 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         const expectedPiSessionId = readSessionHeaderId(canonicalSession, adapter);
         const parentSessionId = ctx.sessionManager.getSessionId();
         if (!parentSessionId) throw new Error("Parent session UUID unavailable");
-        const requested = requestedIdentity({}, null, ctx);
+        // Resume on the child's ORIGINAL provider/model (from the prior
+        // attempt record for this session file), not the parent's model.
+        // Falls back to the parent's identity only if no prior record exists.
+        const prior = workerRegistry.workers
+          .filter((w) => w.sessionFile === canonicalSession && w.requested)
+          .sort((a, b) => b.createdAt - a.createdAt)[0];
+        const requested = prior
+          ? { ...prior.requested }
+          : requestedIdentity({}, null, ctx);
         const artifactDir = getArtifactDir(ctx.sessionManager.getSessionDir(), parentSessionId);
         const attemptId = randomUUID();
         const activityFile = getSubagentActivityFile(artifactDir, attemptId);
