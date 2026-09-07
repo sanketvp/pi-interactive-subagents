@@ -565,6 +565,42 @@ describe("registered subagent-release command", () => {
     }
   });
 
+  // Live-trial regression (2026-09-07): the worker shell exits on its own, tmux
+  // reaps the pane, and the authenticated outcome + exit receipt make the
+  // watcher try to auto-close. kill-pane fails (pane gone) -- the watcher must
+  // settle the record as `proven_absent` instead of retrying forever.
+  it("a worker whose pane already exited after outcome + exit receipt settles as proven_absent (no infinite close retry, no diagnostic)", async () => {
+    const harness = startPrivateTmux();
+    const root = mkdtempSync(join(tmpdir(), "pi-self-exited-"));
+    const workers: LiveWorker[] = [];
+    try {
+      await withEnv(harness, root, async () => {
+        process.env.PI_DISPATCH_SH = writeSleepDispatcher(root, 1);
+        const worker = await launchLiveWorker(harness, root);
+        workers.push(worker);
+        const { ctx, attemptId } = worker;
+        const registryPath = registryFileFor(ctx.sessionManager.getSessionDir(), ctx.sessionManager.getSessionId());
+        const load = () => {
+          const loaded = loadRegistry(registryPath);
+          assert.equal(loaded.status, "ok");
+          return loaded.status === "ok" ? loaded.registry.workers.find((w) => w.attemptId === attemptId)! : null!;
+        };
+        await waitFor(() => load().resourceState === "proven_absent", 15000, 100);
+        const record = load();
+        assert.equal(record.resourceState, "proven_absent");
+        assert.equal(record.outcome, "error", "sleep dispatcher exits without a child completion -> pre-start shell error outcome");
+        assert.equal(record.watcherDiagnostic ?? null, null, "normal self-exit is not a watcher failure");
+        assert.equal(harness.tmux("list-panes", "-t", "w", "-F", "#{pane_id}").split("\n").length, 1, "only the parent pane remains");
+        const testApi = testApiOf();
+        assert.equal(testApi.runningSubagents.has(attemptId), false, "watcher must stop tracking a settled attempt");
+      });
+    } finally {
+      for (const w of workers) shutdownExtension(w.handlers, w.ctx);
+      harness.kill();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("release-without-close clears only exact ownership tags and retains the pane", async () => {
     const harness = startPrivateTmux();
     const root = mkdtempSync(join(tmpdir(), "pi-release-clear-"));
