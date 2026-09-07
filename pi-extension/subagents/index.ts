@@ -1,8 +1,51 @@
-import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
-import { keyHint } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { keyHint } from "@earendil-works/pi-coding-agent";
 import { Type, type Static } from "@sinclair/typebox";
-import { Box, Text, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
+import { Box, Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { dirname, join } from "node:path";
+import { validateLaunch, shouldCloseAfterWatchError } from "./hardening.ts";
+import { randomUUID } from "node:crypto";
+import {
+  type AttemptRecord,
+  type WorkerRegistry,
+  countLiveResources,
+  loadRegistry,
+} from "./registry.ts";
+import {
+  applyRecovery,
+  applyStartupReceipt,
+  assertCanLaunch,
+  canAutoClose,
+  canonicalizeSessionFile,
+  classifySocket,
+  closeOwned,
+  currentTmuxSocket,
+  currentWindowId,
+  diagnoseText,
+  dispatcherPath,
+  freezePaneStartCommand,
+  invokeSplit,
+  LIVE_RESOURCE_STATES,
+  markTakenOver,
+  persistDeliveryAttempted,
+  persistOutcomePending,
+  persistPreparingIntent,
+  persistRecord,
+  persistRegistry,
+  persistSplitRequested,
+  readPaneToken,
+  readSessionHeaderId,
+  recoverSurface,
+  releaseWithoutClose,
+  requestedObservedMismatch,
+  writeLaunchScript,
+} from "./lifecycle.ts";
+import { getLifecycleAdapter, setLifecycleAdapter } from "./adapter.ts";
+import {
+  validateCompletion,
+  validateExitReceipt,
+  validateStartupReceipt,
+} from "./completion.mjs";
 import { fileURLToPath } from "node:url";
 import {
   readdirSync,
@@ -20,7 +63,8 @@ import {
   createSurface,
   sendLongCommand,
   pollForExit,
-  closeSurface,
+  closeSurface as closeMuxSurface,
+  claimSurface,
   getMuxBackend,
   sendEscape,
   shellEscape,
@@ -259,7 +303,7 @@ function discoverAgentDefinitions(): ListedAgentDefinition[] {
   const dirs: Array<{ path: string; source: AgentSource }> = [
     { path: getBundledAgentsDir(), source: "package" },
     { path: join(getAgentConfigDir(), "agents"), source: "global" },
-    { path: join(process.cwd(), ".pi", "agents"), source: "project" },
+    ...(process.env.PI_INTERACTIVE_TRUST_PROJECT_AGENTS === "1" ? [{ path: join(process.cwd(), ".pi", "agents"), source: "project" as AgentSource }] : []),
   ];
 
   for (const { path: dir, source } of dirs) {
@@ -289,9 +333,9 @@ function resolveSubagentPaths(
       ? rawCwd
       : join(cwdBase, rawCwd)
     : null;
-  const localAgentDir = effectiveCwd ? join(effectiveCwd, ".pi", "agent") : null;
-  const effectiveAgentDir =
-    localAgentDir && existsSync(localAgentDir) ? localAgentDir : getAgentConfigDir();
+  // A repository must not silently replace the child's global configuration/auth root.
+  const localAgentDir = null;
+  const effectiveAgentDir = getAgentConfigDir();
   return { effectiveCwd, localAgentDir, effectiveAgentDir };
 }
 
@@ -359,7 +403,7 @@ function resolveEffectiveInteractive(
 function loadAgentDefaults(agentName: string): AgentDefaults | null {
   const configDir = getAgentConfigDir();
   const paths = [
-    join(process.cwd(), ".pi", "agents", `${agentName}.md`),
+    ...(process.env.PI_INTERACTIVE_TRUST_PROJECT_AGENTS === "1" ? [join(process.cwd(), ".pi", "agents", `${agentName}.md`)] : []),
     join(configDir, "agents", `${agentName}.md`),
     join(getBundledAgentsDir(), `${agentName}.md`),
   ];
@@ -495,6 +539,9 @@ interface RunningSubagent {
   startTime: number;
   sessionFile: string;
   launchScriptFile?: string;
+  completionFile?: string;
+  completionToken?: string;
+  tmuxSocket?: string;
   activityFile?: string;
   activity?: SubagentActivityState;
   activityRead?: {
@@ -513,10 +560,29 @@ interface RunningSubagent {
    * subagent's pane (e.g. planner).
    */
   interactive: boolean;
+  attempt?: AttemptRecord;
+  watcherGeneration?: number;
 }
 
 /** All currently running subagents, keyed by id. */
 const runningSubagents = new Map<string, RunningSubagent>();
+let registryFile: string | undefined;
+let registryReady = false;
+let invocationCount = 0;
+let workerRegistry: WorkerRegistry = { version: 1, invocations: 0, workers: [] };
+let registryValidationError: string | null = null;
+let registryRawBytes: Buffer | null = null;
+let watcherGeneration = 0;
+function persistWorkers() {
+  if (!registryFile || !registryReady) return;
+  persistRegistry(registryFile, { ...workerRegistry, invocations: invocationCount });
+}
+async function withLaunchReservation<T>(launch: () => Promise<T>): Promise<T> {
+  if (!registryReady) throw new Error("Worker registry is not initialized or failed validation; refusing launch");
+  if (process.env.PI_SUBAGENT_ID) throw new Error("Nested worker spawning is disabled");
+  assertCanLaunch({ ...workerRegistry, invocations: invocationCount });
+  return await launch();
+}
 
 // ── Widget management ──
 
@@ -606,7 +672,9 @@ function renderSubagentWidgetLines(agents: RunningSubagent[], width: number): st
   for (const agent of agents) {
     const elapsed = formatElapsedMMSS(agent.startTime);
     const agentTag = agent.agent ? ` (${agent.agent})` : "";
-    const left = ` ${elapsed}  ${agent.name}${agentTag} `;
+    const pending = agent.attempt?.deliveryState ? ` ${agent.attempt.deliveryState}` : "";
+    const state = agent.attempt?.resourceState ? ` ${agent.attempt.resourceState}` : "";
+    const left = ` ${elapsed}  ${agent.name}${agentTag}${state}${pending} `;
     const snapshot = classifyStatus(agent.statusState, Date.now());
     const right = statusConfig.enabled
       ? formatWidgetRightLabel(snapshot)
@@ -623,6 +691,20 @@ function renderSubagentWidgetLines(agents: RunningSubagent[], width: number): st
 
 function updateWidget() {
   if (!latestCtx?.hasUI) return;
+
+  if (registryValidationError) {
+    latestCtx.ui.setWidget(
+      "subagent-status",
+      (_tui: any, _theme: any) => ({
+        invalidate() {},
+        render(_width: number) {
+          return ["worker registry invalid — launches disabled", "Use /subagents-diagnose. File left byte-for-byte untouched."];
+        },
+      }),
+      { placement: "aboveEditor" },
+    );
+    return;
+  }
 
   if (runningSubagents.size === 0) {
     latestCtx.ui.setWidget("subagent-status", undefined);
@@ -773,10 +855,47 @@ function resolveInterruptTarget(params: { id?: string; name?: string }):
   return { error: `Ambiguous subagent name "${requestedName}". Matches: ${candidates}` };
 }
 
+/**
+ * Interrupt must only ever send Escape to an exact, currently owned tmux
+ * pane (`%N`) on the CURRENT tmux socket. An empty, malformed, or
+ * foreign-socket surface must never reach `sendEscapeKey` -- e.g. an empty
+ * string target on tmux's `send-keys` falls back to the default/active
+ * pane, which could hit an unrelated pane.
+ */
+function isExactOwnedSurface(running: RunningSubagent): boolean {
+  const surface = running.surface;
+  if (!surface || !/^%\d+$/.test(surface)) return false;
+  const socket = running.attempt?.tmuxSocket ?? running.tmuxSocket;
+  if (!socket) return false;
+  const current = currentTmuxSocket();
+  if (!current || socket !== current) return false;
+  // `%N` format + matching socket alone is NOT proof of current ownership:
+  // tmux pane ids can be reused/collide across separate tmux server
+  // processes bound to the same socket path over time, and a stale/foreign
+  // record could otherwise target a pane that is no longer (or never was)
+  // this attempt's pane. Require the pane's live @pi-worker-token tag to
+  // match the record's completionToken -- the same ownership proof already
+  // required before releasing or closing a pane (readPaneToken/killOwnedPane).
+  const token = running.attempt?.completionToken ?? running.completionToken;
+  if (!token) return false;
+  try {
+    return readPaneToken(socket, surface, getLifecycleAdapter()) === token;
+  } catch {
+    return false;
+  }
+}
+
 function requestSubagentInterrupt(
   running: RunningSubagent,
   sendEscapeKey: (surface: string) => void = sendEscape,
 ): { ok: true } | { error: string } {
+  if (!isExactOwnedSurface(running)) {
+    return {
+      error:
+        `Refusing to interrupt subagent "${running.name}": no exact owned tmux surface on the ` +
+        `current socket (surface=${JSON.stringify(running.surface)}). No tmux command was issued.`,
+    };
+  }
   try {
     sendEscapeKey(running.surface);
     return { ok: true };
@@ -892,6 +1011,125 @@ function resolveResumeLaunchBehavior(params: { autoExit?: boolean }): { autoExit
   return { autoExit, interactive: !autoExit };
 }
 
+function requireTuiParent(ctx: { mode?: string }): void {
+  if (ctx.mode !== "tui") {
+    throw new Error('Worker launches require a TUI parent (ctx.mode === "tui")');
+  }
+}
+
+function requestedIdentity(
+  params: { model?: string },
+  agentDefs: AgentDefaults | null,
+  ctx: { model?: { provider?: string; id?: string }; thinkingLevel?: string },
+): { provider: string; model: string; thinking: string } {
+  const raw = params.model ?? agentDefs?.model;
+  let provider: string | undefined;
+  let model: string | undefined;
+  if (raw && raw.includes("/")) {
+    const idx = raw.indexOf("/");
+    provider = raw.slice(0, idx);
+    model = raw.slice(idx + 1);
+  } else if (raw) {
+    model = raw;
+  }
+  provider = provider || ctx.model?.provider;
+  model = model || ctx.model?.id;
+  const thinking = agentDefs?.thinking || ctx.thinkingLevel || "off";
+  if (!provider || !model) {
+    throw new Error("Cannot record requested provider/model; ctx.model fields unavailable");
+  }
+  return { provider, model, thinking: String(thinking) };
+}
+
+function buildDispatcherArgs(options: {
+  provider: string;
+  model: string;
+  thinking: string;
+  sessionFile: string;
+  extensionPath: string;
+  repo: string;
+  tools?: string | null;
+  promptArgs: string[];
+  /** "replace" -> --system-prompt <path>; "append" -> --append-system-prompt <path>. */
+  systemPromptFlag?: "replace" | "append" | null;
+  systemPromptPath?: string | null;
+}): string[] {
+  const args = [
+    "--interactive",
+    "--provider",
+    options.provider,
+    "--model",
+    options.model,
+    "--effort",
+    options.thinking,
+    "--session",
+    options.sessionFile,
+    "-e",
+    options.extensionPath,
+    "--repo",
+    options.repo,
+  ];
+  if (options.tools) {
+    args.push("--tools", options.tools);
+  }
+  if (options.systemPromptFlag && options.systemPromptPath) {
+    args.push(
+      options.systemPromptFlag === "replace" ? "--system-prompt" : "--append-system-prompt",
+      options.systemPromptPath,
+    );
+  }
+  args.push("--", ...options.promptArgs);
+  return args;
+}
+
+function runningFromAttempt(
+  record: AttemptRecord,
+  extras: Partial<RunningSubagent> = {},
+): RunningSubagent {
+  return {
+    id: record.attemptId,
+    name: record.name,
+    task: record.task,
+    agent: record.agent,
+    surface: record.surface ?? "",
+    startTime: record.createdAt,
+    sessionFile: record.sessionFile,
+    launchScriptFile: record.launchScriptFile,
+    completionFile: record.completionFile,
+    completionToken: record.completionToken,
+    tmuxSocket: record.tmuxSocket,
+    interactive: !!record.interactive,
+    statusState: createStatusState({ source: "pi", startTimeMs: record.createdAt }),
+    attempt: record,
+    ...extras,
+  };
+}
+
+function syncAttempt(running: RunningSubagent, record: AttemptRecord): void {
+  running.attempt = record;
+  running.id = record.attemptId;
+  running.surface = record.surface ?? "";
+  running.sessionFile = record.sessionFile;
+  running.completionFile = record.completionFile;
+  running.completionToken = record.completionToken;
+  running.tmuxSocket = record.tmuxSocket;
+}
+
+function commitRegistry(next: WorkerRegistry, record?: AttemptRecord, running?: RunningSubagent): void {
+  workerRegistry = { ...next, invocations: next.invocations };
+  invocationCount = next.invocations;
+  if (record && running) syncAttempt(running, record);
+}
+
+function readJsonFile(path: string): any | null {
+  try {
+    return JSON.parse(getLifecycleAdapter().fs.readFileSync(path, "utf8") as string);
+  } catch (error: any) {
+    if (error?.code === "ENOENT") return null;
+    throw error;
+  }
+}
+
 export const __test__ = {
   borderLine,
   getShellReadyDelayMs,
@@ -913,6 +1151,10 @@ export const __test__ = {
   resolveResumeLaunchBehavior,
   runningSubagents,
   formatElapsed,
+  setLifecycleAdapter,
+  requestedIdentity,
+  buildDispatcherArgs,
+  requireTuiParent,
 };
 
 function startWidgetRefresh() {
@@ -930,49 +1172,47 @@ function startWidgetRefresh() {
  *
  * Call watchSubagent() on the returned object to observe completion.
  */
-async function launchSubagent(
+async function launchSubagent(...args: Parameters<typeof launchSubagentImpl>): Promise<RunningSubagent> {
+  return withLaunchReservation(() => launchSubagentImpl(...args));
+}
+async function launchSubagentImpl(
   params: typeof SubagentParams.static,
-  ctx: { sessionManager: { getSessionFile(): string | null; getSessionId(): string; getSessionDir(): string }; cwd: string },
-  options?: { surface?: string },
+  ctx: {
+    mode?: string;
+    cwd: string;
+    model?: { provider?: string; id?: string };
+    thinkingLevel?: string;
+    sessionManager: { getSessionFile(): string | null; getSessionId(): string; getSessionDir(): string };
+  },
+  _options?: { surface?: string },
 ): Promise<RunningSubagent> {
-  const startTime = Date.now();
-  const id = Math.random().toString(16).slice(2, 10);
-
+  requireTuiParent(ctx);
+  validateLaunch(params, null, !!process.env.PI_SUBAGENT_ID);
   const agentDefs = params.agent ? loadAgentDefaults(params.agent) : null;
-  const effectiveModel = params.model ?? agentDefs?.model;
+  validateLaunch(params, agentDefs);
+  if (getMuxBackend() !== "tmux") throw new Error("This hardened fork requires tmux; no backend fallback is allowed");
   const effectiveTools = params.tools ?? agentDefs?.tools;
   const effectiveSkills = params.skills ?? agentDefs?.skills;
-  const effectiveThinking = agentDefs?.thinking;
   const effectiveInteractive = resolveEffectiveInteractive(params, agentDefs);
+  const requested = requestedIdentity(params, agentDefs, ctx);
+  const adapter = getLifecycleAdapter();
+  const tmuxSocket = currentTmuxSocket();
+  const parentPane = process.env.TMUX_PANE;
+  if (!tmuxSocket || !parentPane) throw new Error("tmux socket/window identity is required");
+  const windowId = currentWindowId(tmuxSocket, parentPane, adapter);
 
   const sessionFile = ctx.sessionManager.getSessionFile();
   if (!sessionFile) throw new Error("No session file");
-  const sessionId = ctx.sessionManager.getSessionId();
-  const artifactDir = getArtifactDir(ctx.sessionManager.getSessionDir(), sessionId);
+  const parentSessionId = ctx.sessionManager.getSessionId();
+  if (!parentSessionId) throw new Error("Parent session UUID unavailable");
+  const artifactDir = getArtifactDir(ctx.sessionManager.getSessionDir(), parentSessionId);
 
   const { effectiveCwd, localAgentDir, effectiveAgentDir } = resolveSubagentPaths(params, agentDefs);
   const targetCwdForSession = effectiveCwd ?? ctx.cwd;
   const sessionDir = getDefaultSessionDirFor(targetCwdForSession, effectiveAgentDir);
-
-  // Generate a deterministic session file path for this subagent.
-  // This eliminates race conditions when multiple agents launch simultaneously —
-  // each agent knows exactly which file is theirs.
+  const attemptId = randomUUID();
   const timestamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 23) + "Z";
-  const uuid = [
-    id,
-    Math.random().toString(16).slice(2, 10),
-    Math.random().toString(16).slice(2, 10),
-    Math.random().toString(16).slice(2, 6),
-  ].join("-");
-  const subagentSessionFile = join(sessionDir, `${timestamp}_${uuid}.jsonl`);
-
-  // Use pre-created surface (parallel mode) or create a new one.
-  // For new surfaces, pause briefly so the shell is ready before sending the command.
-  const surfacePreCreated = !!options?.surface;
-  const surface = options?.surface ?? createSurface(params.name);
-  if (!surfacePreCreated) {
-    await new Promise<void>((resolve) => setTimeout(resolve, getShellReadyDelayMs()));
-  }
+  const subagentSessionFile = join(sessionDir, `${timestamp}_${attemptId}.jsonl`);
 
   const launchBehavior = resolveLaunchBehavior(params, agentDefs);
 
@@ -985,8 +1225,9 @@ async function launchSubagent(
     });
   }
 
-  const activityFile = getSubagentActivityFile(artifactDir, id);
-  mkdirSync(dirname(activityFile), { recursive: true });
+  const activityFile = getSubagentActivityFile(artifactDir, attemptId);
+  const completionFile = join(artifactDir, "completions", `${attemptId}.json`);
+  mkdirSync(dirname(activityFile), { recursive: true, mode: 0o700 });
   const { inheritsConversationContext } = launchBehavior;
 
   // Build the task message
@@ -1006,98 +1247,10 @@ async function launchSubagent(
   const fullTask = inheritsConversationContext
     ? params.task
     : `${roleBlock}\n\n${modeHint}\n\n${params.task}\n\n${summaryInstruction}`;
-  // ── Claude Code CLI path ──
-  if (agentDefs?.cli === "claude") {
-    const sentinelFile = `/tmp/pi-claude-${id}-done`;
-    const pluginDir = join(SUBAGENTS_DIR, "plugin");
-
-    const cmdParts: string[] = [];
-    cmdParts.push(`PI_CLAUDE_SENTINEL=${shellEscape(sentinelFile)}`);
-    cmdParts.push("claude");
-    cmdParts.push("--dangerously-skip-permissions");
-
-    if (existsSync(pluginDir)) {
-      cmdParts.push("--plugin-dir", shellEscape(pluginDir));
-    }
-
-    if (effectiveModel) {
-      cmdParts.push("--model", shellEscape(effectiveModel));
-    }
-
-    const sp = params.systemPrompt ?? agentDefs.body;
-    if (sp) {
-      cmdParts.push("--append-system-prompt", shellEscape(sp));
-    }
-
-    if (params.resumeSessionId) {
-      cmdParts.push("--resume", shellEscape(params.resumeSessionId));
-    }
-
-    // Always pass the task as the prompt — even for resumed sessions,
-    // the caller's task is the follow-up instruction.
-    cmdParts.push(shellEscape(params.task));
-
-    const cdPrefix = effectiveCwd ? `cd ${shellEscape(effectiveCwd)} && ` : "";
-    const command = `${cdPrefix}${cmdParts.join(" ")}; echo '__SUBAGENT_DONE_'$?'__'`;
-
-    const launchScriptName = `${(params.name || "subagent")
-      .toLowerCase()
-      .replace(/[^a-z0-9\s-]/g, "")
-      .replace(/\s+/g, "-")
-      .replace(/-+/g, "-")
-      .replace(/^-|-$/g, "") || "subagent"}-${id}.sh`;
-    const launchScriptFile = join(artifactDir, "subagent-scripts", launchScriptName);
-
-    sendLongCommand(surface, command, {
-      scriptPath: launchScriptFile,
-      scriptPreamble: [
-        `# Claude Code subagent launch script for ${params.name}`,
-        `# Generated: ${new Date().toISOString()}`,
-        `# Surface: ${surface}`,
-      ].join("\n"),
-    });
-
-    const running: RunningSubagent = {
-      id,
-      name: params.name,
-      task: params.task,
-      agent: params.agent,
-      surface,
-      startTime,
-      sessionFile: subagentSessionFile,
-      launchScriptFile,
-      cli: "claude",
-      sentinelFile,
-      interactive: effectiveInteractive,
-      statusState: createStatusState({
-        source: "claude",
-        startTimeMs: startTime,
-      }),
-    };
-
-    runningSubagents.set(id, running);
-    return running;
-  }
-
-  // ── Pi CLI path ──
-
-  // Build pi command
-  const parts: string[] = ["pi"];
-  parts.push("--session", shellEscape(subagentSessionFile));
-
-  const subagentDonePath = join(SUBAGENTS_DIR, "subagent-done.ts");
-  parts.push("-e", shellEscape(subagentDonePath));
-
-  if (effectiveModel) {
-    const model = effectiveThinking ? `${effectiveModel}:${effectiveThinking}` : effectiveModel;
-    parts.push("--model", shellEscape(model));
-  }
-
-  // Pass agent body as system prompt via file to avoid shell escaping issues
-  // with multiline content. Pi's --append-system-prompt and --system-prompt
-  // auto-detect file paths and read their contents.
+  let systemPromptFlag: "replace" | "append" | null = null;
+  let systemPromptPath: string | null = null;
   if (identityInSystemPrompt && identity) {
-    const flag = systemPromptMode === "replace" ? "--system-prompt" : "--append-system-prompt";
+    systemPromptFlag = systemPromptMode === "replace" ? "replace" : "append";
     const spTimestamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
     const spSafeName = params.name
       .toLowerCase()
@@ -1106,114 +1259,97 @@ async function launchSubagent(
       .replace(/-+/g, "-")
       .replace(/^-|-$/g, "");
     const syspromptPath = join(artifactDir, `context/${spSafeName || "subagent"}-sysprompt-${spTimestamp}.md`);
-    mkdirSync(dirname(syspromptPath), { recursive: true });
+    mkdirSync(dirname(syspromptPath), { recursive: true, mode: 0o700 });
     writeFileSync(syspromptPath, identity, "utf8");
-    parts.push(flag, shellEscape(syspromptPath));
+    systemPromptPath = syspromptPath;
   }
 
   const toolAllowlist = buildSubagentToolAllowlist(effectiveTools);
-  if (toolAllowlist) {
-    parts.push("--tools", shellEscape(toolAllowlist));
-  }
-
-  // Build env prefix: denied tools + subagent identity + config dir propagation
-  const envParts: string[] = [];
-
-  // If the target cwd has its own .pi/agent/, use that as the config root.
-  // Otherwise propagate the current/global agent dir.
-  if (localAgentDir && existsSync(localAgentDir)) {
-    envParts.push(`PI_CODING_AGENT_DIR=${shellEscape(localAgentDir)}`);
-  } else if (process.env.PI_CODING_AGENT_DIR) {
-    envParts.push(`PI_CODING_AGENT_DIR=${shellEscape(process.env.PI_CODING_AGENT_DIR)}`);
-  }
-
-  if (denySet.size > 0) {
-    envParts.push(`PI_DENY_TOOLS=${shellEscape([...denySet].join(","))}`);
-  }
-  envParts.push(`PI_SUBAGENT_NAME=${shellEscape(params.name)}`);
-  if (params.agent) {
-    envParts.push(`PI_SUBAGENT_AGENT=${shellEscape(params.agent)}`);
-  }
-  if (agentDefs?.autoExit) {
-    envParts.push(`PI_SUBAGENT_AUTO_EXIT=1`);
-  }
-  envParts.push(`PI_SUBAGENT_SESSION=${shellEscape(subagentSessionFile)}`);
-  envParts.push(`PI_SUBAGENT_ID=${shellEscape(id)}`);
-  envParts.push(`PI_SUBAGENT_ACTIVITY_FILE=${shellEscape(activityFile)}`);
-  envParts.push(`PI_SUBAGENT_SURFACE=${shellEscape(surface)}`);
-  const envPrefix = envParts.join(" ") + " ";
-
-  // Pass task and skill prompts to the sub-agent.
-  // Only full-context fork mode gets a direct task argument because it already
-  // inherits the parent conversation. Blank-session modes use artifact-backed
-  // handoff so the wrapper instructions arrive as the initial user message.
   let taskArg: string;
   if (launchBehavior.taskDelivery === "direct") {
     taskArg = fullTask;
   } else {
-    const timestamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+    const taskTimestamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
     const safeName = params.name
       .toLowerCase()
-      .replace(/[^a-z0-9\s-]/g, "") // strip everything except alphanumeric, spaces, hyphens
-      .replace(/\s+/g, "-") // spaces to hyphens
-      .replace(/-+/g, "-") // collapse multiple hyphens
-      .replace(/^-|-$/g, ""); // trim leading/trailing hyphens
-    const artifactName = `context/${safeName || "subagent"}-${timestamp}.md`;
-    const artifactPath = join(artifactDir, artifactName);
-    mkdirSync(dirname(artifactPath), { recursive: true });
+      .replace(/[^a-z0-9\s-]/g, "")
+      .replace(/\s+/g, "-")
+      .replace(/-+/g, "-")
+      .replace(/^-|-$/g, "");
+    const artifactPath = join(artifactDir, `context/${safeName || "subagent"}-${taskTimestamp}.md`);
+    mkdirSync(dirname(artifactPath), { recursive: true, mode: 0o700 });
     writeFileSync(artifactPath, fullTask, "utf8");
     taskArg = `@${artifactPath}`;
   }
-
-  for (const promptArg of buildPiPromptArgs({
+  const promptArgs = buildPiPromptArgs({
     effectiveSkills,
     taskDelivery: launchBehavior.taskDelivery,
     taskArg,
-  })) {
-    parts.push(shellEscape(promptArg));
-  }
-
-  // Resolve cwd — param overrides agent default, supports absolute and relative paths.
-  // This was already computed above so session placement, PI_CODING_AGENT_DIR, and cd agree.
-  const cdPrefix = effectiveCwd ? `cd ${shellEscape(effectiveCwd)} && ` : "";
-
-  const piCommand = cdPrefix + envPrefix + parts.join(" ");
-  const command = `${piCommand}; echo '__SUBAGENT_DONE_'$?'__'`;
-  const launchScriptName = `${(params.name || "subagent")
-    .toLowerCase()
-    .replace(/[^a-z0-9\s-]/g, "")
-    .replace(/\s+/g, "-")
-    .replace(/-+/g, "-")
-    .replace(/^-|-$/g, "") || "subagent"}-${id}.sh`;
-  const launchScriptFile = join(artifactDir, "subagent-scripts", launchScriptName);
-  sendLongCommand(surface, command, {
-    scriptPath: launchScriptFile,
-    scriptPreamble: [
-      `# Subagent launch script for ${params.name}`,
-      `# Generated: ${new Date().toISOString()}`,
-      `# Session: ${subagentSessionFile}`,
-      `# Surface: ${surface}`,
-    ].join("\n"),
   });
-
-  const running: RunningSubagent = {
-    id,
+  const launchScriptFile = join(artifactDir, "subagent-scripts", `subagent-${attemptId}.sh`);
+  if (!registryFile) throw new Error("Worker registry path is not initialized");
+  const began = persistPreparingIntent({
+    registryPath: registryFile,
+    registry: { ...workerRegistry, invocations: invocationCount },
+    attemptId,
     name: params.name,
     task: params.task,
     agent: params.agent,
-    surface,
-    startTime,
+    title: params.name,
+    repository: targetCwdForSession,
+    parentSessionId,
     sessionFile: subagentSessionFile,
     launchScriptFile,
-    activityFile,
+    completionFile,
+    tmuxSocket,
+    windowId,
+    requested,
     interactive: effectiveInteractive,
-    statusState: createStatusState({
-      source: "pi",
-      startTimeMs: startTime,
-    }),
+    paneStartCommand: freezePaneStartCommand(launchScriptFile),
+  }, adapter);
+  commitRegistry(began.registry, began.record);
+  const env: Record<string, string> = {
+    PI_SUBAGENT_NAME: params.name,
+    PI_SUBAGENT_SESSION: subagentSessionFile,
+    PI_SUBAGENT_COMPLETION_FILE: completionFile,
+    PI_SUBAGENT_TOKEN: began.record.completionToken,
+    PI_SUBAGENT_ID: began.record.attemptId,
+    PI_SUBAGENT_ACTIVITY_FILE: activityFile,
   };
-
-  runningSubagents.set(id, running);
+  if (params.agent) env.PI_SUBAGENT_AGENT = params.agent;
+  if (agentDefs?.autoExit) env.PI_SUBAGENT_AUTO_EXIT = "1";
+  if (denySet.size > 0) env.PI_DENY_TOOLS = [...denySet].join(",");
+  if (localAgentDir && existsSync(localAgentDir)) env.PI_CODING_AGENT_DIR = localAgentDir;
+  else if (process.env.PI_CODING_AGENT_DIR) env.PI_CODING_AGENT_DIR = process.env.PI_CODING_AGENT_DIR;
+  const dispatcherArgs = buildDispatcherArgs({
+    provider: requested.provider,
+    model: requested.model,
+    thinking: requested.thinking,
+    sessionFile: subagentSessionFile,
+    extensionPath: join(SUBAGENTS_DIR, "subagent-done.ts"),
+    repo: targetCwdForSession,
+    tools: toolAllowlist,
+    promptArgs,
+    systemPromptFlag,
+    systemPromptPath,
+  });
+  writeLaunchScript({
+    scriptPath: launchScriptFile,
+    attemptId: began.record.attemptId,
+    token: began.record.completionToken,
+    socket: tmuxSocket,
+    dispatcher: dispatcherPath(),
+    dispatcherArgs,
+    env,
+    cwd: effectiveCwd ?? undefined,
+    preamble: [`Subagent launch script for ${params.name}`, `Session: ${subagentSessionFile}`].join("\n"),
+  }, adapter);
+  const splitReady = persistSplitRequested(registryFile, began.registry, began.record, freezePaneStartCommand(launchScriptFile), adapter);
+  commitRegistry(splitReady.registry, splitReady.record);
+  const launched = invokeSplit(registryFile, splitReady.registry, splitReady.record, adapter);
+  commitRegistry(launched.registry, launched.record);
+  const running = runningFromAttempt(launched.record, { activityFile, watcherGeneration });
+  runningSubagents.set(running.id, running);
   return running;
 }
 
@@ -1243,128 +1379,324 @@ function copyClaudeSession(sentinelFile: string): string | null {
   }
 }
 
+function sleep(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) return reject(new Error("Aborted"));
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    function onAbort() {
+      clearTimeout(timer);
+      reject(new Error("Aborted"));
+    }
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+function authenticatedPresentation(summary: string): string {
+  return `reported outcome (authenticated, unverified)\n${summary}`;
+}
+
+function watcherIsCurrent(running: RunningSubagent): boolean {
+  return running.watcherGeneration === watcherGeneration && registryReady && !!registryFile;
+}
+
+function deliverAuthenticatedOutcome(
+  pi: ExtensionAPI,
+  running: RunningSubagent,
+  record: AttemptRecord,
+  data: any,
+): AttemptRecord {
+  if (!registryFile || !watcherIsCurrent(running)) return record;
+  if (record.deliveryState === "attempted") return record;
+  const outcomeBytes = JSON.stringify(data);
+  if (record.deliveryState !== "pending") {
+    const pending = persistOutcomePending(registryFile, workerRegistry, record, data.type, outcomeBytes);
+    commitRegistry(pending.registry, pending.record, running);
+    record = pending.record;
+  }
+  if (!watcherIsCurrent(running) || record.deliveryState !== "pending") return record;
+  const elapsed = Math.floor((getLifecycleAdapter().now() - record.createdAt) / 1000);
+  const sessionFile = record.sessionFile;
+  const summary = data.errorMessage
+    ? `Subagent error: ${data.errorMessage}`
+    : existsSync(sessionFile)
+      ? findLastAssistantMessage(getNewEntries(sessionFile, 0)) ?? "Sub-agent exited without output"
+      : "Sub-agent exited without output";
+  if (data.type === "ping") {
+    pi.sendMessage(
+      {
+        customType: "subagent_ping",
+        content: authenticatedPresentation(
+          `Sub-agent "${data.name ?? record.name}" needs help (${formatElapsed(elapsed)}):\n\n${data.message ?? ""}\n\nSession: ${sessionFile}`,
+        ),
+        display: true,
+        details: {
+          name: data.name ?? record.name,
+          message: data.message,
+          sessionFile,
+          attemptId: record.attemptId,
+          unverified: true,
+        },
+      },
+      { triggerTurn: true, deliverAs: "steer" },
+    );
+  } else {
+    const result = {
+      name: record.name,
+      task: record.task,
+      summary,
+      sessionFile,
+      exitCode: data.type === "error" ? 1 : 0,
+      elapsed,
+      errorMessage: data.errorMessage,
+    };
+    pi.sendMessage(
+      {
+        customType: "subagent_result",
+        content: authenticatedPresentation(resolveResultPresentation(result, record.name)),
+        display: true,
+        details: {
+          name: record.name,
+          task: record.task,
+          agent: record.agent,
+          exitCode: result.exitCode,
+          elapsed,
+          sessionFile,
+          attemptId: record.attemptId,
+          parentSessionId: record.parentSessionId,
+          piSessionId: record.piSessionId,
+          unverified: true,
+          ...(data.errorMessage ? { errorMessage: data.errorMessage } : {}),
+        },
+      },
+      { triggerTurn: true, deliverAs: "steer" },
+    );
+  }
+  if (!watcherIsCurrent(running)) return record;
+  const attempted = persistDeliveryAttempted(registryFile, workerRegistry, record);
+  commitRegistry(attempted.registry, attempted.record, running);
+  return attempted.record;
+}
+
+function attachWatcher(running: RunningSubagent, pi: ExtensionAPI): void {
+  const watcherAbort = new AbortController();
+  running.abortController = watcherAbort;
+  running.watcherGeneration = watcherGeneration;
+  void watchSubagent(running, AbortSignal.any([watcherAbort.signal, getModuleAbortSignal()]), pi)
+    .then(() => {
+      if (!watcherIsCurrent(running) || watcherAbort.signal.aborted) return;
+      updateWidget();
+    })
+    .catch(() => {
+      if (!watcherIsCurrent(running)) return;
+      updateWidget();
+    });
+}
+
 async function watchSubagent(
   running: RunningSubagent,
   signal: AbortSignal,
+  pi: ExtensionAPI,
 ): Promise<SubagentResult> {
-  const { name, task, surface, startTime, sessionFile } = running;
-
-  try {
-    const result = await pollForExit(surface, AbortSignal.any([signal, getModuleAbortSignal()]), {
-      interval: 1000,
-      sessionFile,
-      sentinelFile: running.sentinelFile,
-      onTick() {
-        observeRunningSubagent(running);
-      },
-    });
-
-    const elapsed = Math.floor((Date.now() - startTime) / 1000);
-
-    if (running.cli === "claude") {
-      // Claude Code result extraction
-      let summary = "";
-
-      if (running.sentinelFile) {
-        try {
-          summary = readFileSync(running.sentinelFile, "utf-8").trim();
-        } catch {}
-      }
-
-      if (!summary) {
-        summary = readScreen(surface, 200)
-          .replace(/__SUBAGENT_DONE_\d+__/, "")
-          .trimEnd();
-      }
-
-      if (!summary) {
-        summary = result.exitCode !== 0
-          ? `Claude Code exited with code ${result.exitCode}`
-          : "Claude Code exited without output";
-      }
-
-      // Copy Claude session transcript
-      let sessionId: string | null = null;
-      if (running.sentinelFile) {
-        sessionId = copyClaudeSession(running.sentinelFile);
-        try { unlinkSync(running.sentinelFile); } catch {}
-        try { unlinkSync(running.sentinelFile + ".transcript"); } catch {}
-      }
-
-      closeSurface(surface);
-      runningSubagents.delete(running.id);
-
-      return { name, task, summary, exitCode: result.exitCode, elapsed, ...(sessionId ? { claudeSessionId: sessionId } : {}) };
-    }
-
-    // Pi subagent result extraction
-    let summary: string;
-    if (existsSync(sessionFile)) {
-      const allEntries = getNewEntries(sessionFile, 0);
-      summary =
-        findLastAssistantMessage(allEntries) ??
-        (result.errorMessage
-          ? `Subagent error: ${result.errorMessage}`
-          : result.exitCode !== 0
-            ? `Sub-agent exited with code ${result.exitCode}`
-            : "Sub-agent exited without output");
-    } else {
-      summary = result.errorMessage
-        ? `Subagent error: ${result.errorMessage}`
-        : result.exitCode !== 0
-          ? `Sub-agent exited with code ${result.exitCode}`
-          : "Sub-agent exited without output";
-    }
-
-    closeSurface(surface);
-    runningSubagents.delete(running.id);
-
+  const name = running.name;
+  const task = running.task;
+  const startTime = running.startTime;
+  const sessionFile = running.sessionFile;
+  let record = running.attempt;
+  if (!record || !running.completionFile || !registryFile) {
     return {
       name,
       task,
-      summary,
+      summary: "Watcher detached; worker pane retained. This is not a task completion.",
+      exitCode: 1,
+      elapsed: 0,
+      error: "cancelled",
       sessionFile,
-      exitCode: result.exitCode,
-      elapsed,
-      ping: result.ping,
-      ...(result.errorMessage ? { errorMessage: result.errorMessage } : {}),
     };
+  }
+  const foreign = classifySocket(record, currentTmuxSocket()) === "foreign";
+  let sawExit = false;
+  try {
+    while (!signal.aborted && watcherIsCurrent(running)) {
+      record = running.attempt ?? record;
+      if (existsSync(`${running.completionFile}.user-owned`) && record.resourceState !== "taken_over") {
+        const next = markTakenOver(registryFile, workerRegistry, record);
+        commitRegistry(next.registry, next.record, running);
+        record = next.record;
+      }
+      const identity = {
+        attemptId: record.attemptId,
+        token: record.completionToken,
+        sessionFile: record.sessionFile,
+        piSessionId: record.piSessionId ?? undefined,
+      };
+      const start = readJsonFile(`${running.completionFile}.start`);
+      // Gate on `!record.observed`, not `!record.piSessionId`: a resumed
+      // attempt already knows its expected piSessionId BEFORE the child
+      // reports its live startup receipt (persisted from the canonical
+      // session-file header at launch time), so `piSessionId` alone can't
+      // distinguish "already observed" from "expected but not yet observed".
+      if (start && !record.observed) {
+        const receipt = validateStartupReceipt(start, identity);
+        const next = applyStartupReceipt(registryFile, workerRegistry, record, {
+          attemptId: receipt.attemptId,
+          token: receipt.token,
+          piSessionId: receipt.piSessionId,
+          observed: receipt.observed,
+        });
+        commitRegistry(next.registry, next.record, running);
+        record = next.record;
+        const mismatch = requestedObservedMismatch(record);
+        if (mismatch) latestCtx?.ui.notify(`Worker ${record.name} requested vs observed: ${mismatch}`, "warning");
+      }
+      // Rebuild expectations from the (possibly just-updated) record. Once a
+      // startup receipt has been observed the child UUID is established and
+      // every later receipt (error or shell-exit) must bind to it exactly.
+      // Only pre-start shell errors may omit the UUID.
+      const postStart = {
+        attemptId: record.attemptId,
+        token: record.completionToken,
+        sessionFile: record.sessionFile,
+        piSessionId: record.piSessionId ?? undefined,
+        requirePiSessionId: record.observed !== null,
+      };
+      const completion = readJsonFile(running.completionFile);
+      if (completion && record.outcome == null) {
+        validateCompletion(completion, postStart);
+        record = deliverAuthenticatedOutcome(pi, running, record, completion);
+      }
+      const exit = readJsonFile(`${running.completionFile}.exit`);
+      if (exit) {
+        validateExitReceipt(exit, postStart);
+        sawExit = true;
+      }
+      if (!foreign && canAutoClose(record, sawExit, record.outcome != null)) {
+        try {
+          const closed = closeOwned(registryFile, workerRegistry, record);
+          commitRegistry(closed.registry, closed.record, running);
+          runningSubagents.delete(running.id);
+          break;
+        } catch {
+          // Token mismatch or unreachable socket: retain. BUT if the pane is
+          // provably gone from its recorded window (the worker shell exited
+          // on its own and tmux reaped the pane -- the normal case once an
+          // authenticated exit receipt exists), record it as `proven_absent`
+          // and stop, instead of retrying kill-pane every poll forever.
+          const recovered = recoverSurface(record);
+          if (recovered.kind === "proven_absent") {
+            const absent: AttemptRecord = { ...record, resourceState: "proven_absent" };
+            const next = persistRecord(registryFile, workerRegistry, absent);
+            commitRegistry(next, absent, running);
+            record = absent;
+            runningSubagents.delete(running.id);
+            break;
+          }
+        }
+      }
+      if ((foreign || record.resourceState === "taken_over") && record.outcome && sawExit) break;
+      observeRunningSubagent(running);
+      await sleep(250, signal);
+    }
   } catch (err: any) {
-    try {
-      closeSurface(surface);
-    } catch {}
-    runningSubagents.delete(running.id);
-
-    if (signal.aborted) {
+    void shouldCloseAfterWatchError();
+    if (signal.aborted || getModuleAbortSignal().aborted || !watcherIsCurrent(running)) {
       return {
         name,
         task,
-        summary: "Subagent cancelled.",
+        summary: "Watcher detached; worker pane retained. This is not a task completion.",
         exitCode: 1,
         elapsed: Math.floor((Date.now() - startTime) / 1000),
         error: "cancelled",
         sessionFile,
       };
     }
+    // A genuine (non-cancellation) watcher failure -- a malformed/parse or
+    // authentication-mismatch completion/startup/exit record -- must be
+    // durably persisted as `unknown` with a diagnostic, not just returned as
+    // an in-memory error. Otherwise the registry silently keeps stale state
+    // and `/subagents-diagnose` has nothing to show. The resource is NEVER
+    // closed from this path.
+    const diagnostic = err?.message ?? String(err);
+    // Persist for every live state, including an already-`unknown` record, so a
+    // later receipt-authentication failure is never silently dropped.
+    if (registryFile && LIVE_RESOURCE_STATES.has(record.resourceState)) {
+      try {
+        const nextRecord: AttemptRecord = { ...record, resourceState: "unknown", watcherDiagnostic: diagnostic };
+        const next = persistRecord(registryFile, workerRegistry, nextRecord);
+        commitRegistry(next, nextRecord, running);
+      } catch {
+        // Registry write itself failing is reported via the returned error below.
+      }
+    }
     return {
       name,
       task,
-      summary: `Subagent error: ${err?.message ?? String(err)}`,
+      summary: `Subagent error: ${diagnostic}`,
       exitCode: 1,
       elapsed: Math.floor((Date.now() - startTime) / 1000),
-      error: err?.message ?? String(err),
+      error: diagnostic,
+      sessionFile,
     };
   }
+  return {
+    name,
+    task,
+    summary: record.outcome
+      ? authenticatedPresentation(String(record.outcome))
+      : "Watcher detached; worker pane retained. This is not a task completion.",
+    sessionFile,
+    exitCode: record.outcome === "error" ? 1 : 0,
+    elapsed: Math.floor((Date.now() - startTime) / 1000),
+  };
 }
-
 export default function subagentsExtension(pi: ExtensionAPI) {
   // Capture the UI context for widget updates
   pi.on("session_start", (_event, ctx) => {
     latestCtx = ctx;
+    watcherGeneration += 1;
+    registryReady = false;
+    registryValidationError = null;
+    registryRawBytes = null;
+    runningSubagents.clear();
+    registryFile = join(getArtifactDir(ctx.sessionManager.getSessionDir(), ctx.sessionManager.getSessionId()), "workers.json");
+    const loaded = loadRegistry(registryFile);
+    if (loaded.status === "invalid") {
+      registryRawBytes = loaded.raw;
+      registryValidationError = loaded.error;
+      registryReady = false;
+      ctx.ui.notify("worker registry invalid — launches disabled", "error");
+      updateWidget();
+      return;
+    }
+    workerRegistry = loaded.registry;
+    invocationCount = loaded.registry.invocations;
+    registryReady = true;
+    const currentSocket = currentTmuxSocket();
+    for (const original of loaded.registry.workers) {
+      const recovered = applyRecovery(registryFile, workerRegistry, original, currentSocket);
+      commitRegistry(recovered.registry, recovered.record);
+      const record = recovered.record;
+      if (record.resourceState === "closed" || record.resourceState === "released" || record.resourceState === "proven_absent") {
+        continue;
+      }
+      const running = runningFromAttempt(record, { watcherGeneration });
+      runningSubagents.set(running.id, running);
+      if (classifySocket(record, currentSocket) === "foreign") {
+        ctx.ui.notify(`Worker ${record.name} retained on another tmux socket; completion-only recovery (no tmux calls).`, "warning");
+      }
+      if (record.deliveryState === "pending" || record.deliveryState === "attempted") {
+        ctx.ui.notify(`Worker ${record.name} has a pending/uncertain reported outcome (authenticated, unverified). Replay with /subagents-replay ${record.attemptId}.`, "warning");
+      }
+      attachWatcher(running, pi);
+    }
+    if (runningSubagents.size || registryValidationError) { startWidgetRefresh(); startStatusRefresh(pi); }
   });
 
   // Clean up on session shutdown
   pi.on("session_shutdown", (_event, _ctx) => {
+    watcherGeneration += 1;
     if (widgetInterval) {
       clearInterval(widgetInterval);
       widgetInterval = null;
@@ -1377,9 +1709,20 @@ export default function subagentsExtension(pi: ExtensionAPI) {
     }
     const moduleAbort = (globalThis as any)[POLL_ABORT_KEY] as AbortController | undefined;
     if (moduleAbort) moduleAbort.abort();
+    // A subsequent session_start in the SAME process (e.g. a new session
+    // started without a full module reload) must get a live, unaborted
+    // module signal -- otherwise every watcher it attaches would see
+    // getModuleAbortSignal().aborted === true from birth and immediately
+    // misclassify every real failure as "cancelled", silently dropping
+    // diagnostics and never persisting `unknown`. Only /reload's top-level
+    // module re-import path previously created a fresh controller; shutdown
+    // must do the same for same-process session restarts.
+    (globalThis as any)[POLL_ABORT_KEY] = new AbortController();
     for (const [_id, agent] of runningSubagents) {
       agent.abortController?.abort();
     }
+    registryReady = false;
+    registryFile = undefined; // Old aborted closures must not rewrite the new runtime's registry.
     runningSubagents.clear();
   });
 
@@ -1404,14 +1747,15 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         "When the sub-agent finishes, the harness AUTOMATICALLY delivers its result as a steer message that wakes you up and starts a new turn — you do not need to do anything to receive it. " +
         "DO NOT write polling loops, sleep/wait commands, tail/watch scripts, or repeatedly read session/log files to detect completion. DO NOT call subagents_list or any other tool to 'check' status. All of that is wasted work — the harness handles delivery for you. " +
         "DO NOT fabricate, assume, or summarize results after calling this tool. " +
-        "After spawning, either end your turn immediately, or work on other independent tasks (including spawning more subagents in parallel). The harness will wake you with the result when it is ready.",
+        "After spawning, either end your turn immediately, or work on other independent tasks (including spawning more subagents in parallel). The harness will wake you with the result when it is ready. " +
+        "Delivery of the result message is AT-MOST-ONCE, never guaranteed exactly-once: in rare cases (parent reload/crash mid-delivery) a finished sub-agent's result may not arrive automatically. If a sub-agent you spawned seems to have gone silent, check /subagents-diagnose rather than assuming it is still running.",
       promptSnippet:
         "Spawn a sub-agent in a dedicated terminal multiplexer pane. " +
         "This is a fire-and-forget async tool: the call returns immediately with only an acknowledgement. " +
         "When the sub-agent finishes, the harness AUTOMATICALLY delivers its result as a steer message that wakes you up and starts a new turn — you do not need to do anything to receive it. " +
         "DO NOT write polling loops, sleep/wait commands, tail/watch scripts, or repeatedly read session/log files to detect completion. DO NOT call subagents_list or any other tool to 'check' status. All of that is wasted work — the harness handles delivery for you. " +
         "DO NOT fabricate, assume, or summarize results after calling this tool. " +
-        "After spawning, either end your turn immediately, or work on other independent tasks (including spawning more subagents in parallel). The harness will wake you with the result when it is ready.",
+        "After spawning, either end your turn immediately, or work on other independent tasks (including spawning more subagents in parallel). The harness will wake you with the result when it is ready. Delivery is at-most-once (see /subagents-diagnose if a result seems missing).",
       parameters: SubagentParams,
 
       async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -1446,76 +1790,14 @@ export default function subagentsExtension(pi: ExtensionAPI) {
           };
         }
 
+        requireTuiParent(ctx);
         // Launch the subagent (creates pane, sends command)
         const running = await launchSubagent(params, ctx);
-
-        // Create a separate AbortController for the watcher
-        // (the tool's signal completes when we return)
-        const watcherAbort = new AbortController();
-        running.abortController = watcherAbort;
 
         // Start widget refresh and status supervision when the first agent launches
         startWidgetRefresh();
         startStatusRefresh(pi);
-
-        // Fire-and-forget: start watching in background
-        watchSubagent(running, watcherAbort.signal)
-          .then((result) => {
-            updateWidget(); // reflect removal from Map immediately
-
-            if (result.ping) {
-              // Subagent is requesting help — steer a ping message with session path for resume
-              const sessionRef = `\n\nSession: ${result.sessionFile}\nResume: pi --session ${result.sessionFile}`;
-              pi.sendMessage(
-                {
-                  customType: "subagent_ping",
-                  content: `Sub-agent "${result.ping.name}" needs help (${formatElapsed(result.elapsed)}):\n\n${result.ping.message}${sessionRef}`,
-                  display: true,
-                  details: {
-                    name: result.ping.name,
-                    message: result.ping.message,
-                    agent: running.agent,
-                    sessionFile: result.sessionFile,
-                  },
-                },
-                { triggerTurn: true, deliverAs: "steer" },
-              );
-              return;
-            }
-
-            const presentation = resolveResultPresentation(result, running.name);
-
-            pi.sendMessage(
-              {
-                customType: "subagent_result",
-                content: presentation,
-                display: true,
-                details: {
-                  name: running.name,
-                  task: running.task,
-                  agent: running.agent,
-                  exitCode: result.exitCode,
-                  elapsed: result.elapsed,
-                  sessionFile: result.sessionFile,
-                  ...(result.errorMessage ? { errorMessage: result.errorMessage } : {}),
-                  ...(result.claudeSessionId ? { claudeSessionId: result.claudeSessionId } : {}),
-                },
-              },
-              { triggerTurn: true, deliverAs: "steer" },
-            );
-          })
-          .catch((err) => {
-            updateWidget();
-            pi.sendMessage(
-              {
-                customType: "subagent_result",
-                content: `Sub-agent "${running.name}" error: ${err?.message ?? String(err)}`,
-                display: true,
-                details: { name: running.name, task: running.task, error: err?.message },
-              },
-              { triggerTurn: true, deliverAs: "steer" },
-            );
-          });
+        attachWatcher(running, pi);
 
         // Return immediately
         return {
@@ -1772,15 +2054,16 @@ export default function subagentsExtension(pi: ExtensionAPI) {
       },
 
       async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+        if (!registryReady) throw new Error("Worker registry is not initialized or failed validation; refusing launch");
+        if (process.env.PI_SUBAGENT_ID) throw new Error("Nested worker spawning is disabled");
+        requireTuiParent(ctx);
         const name = params.name ?? "Resume";
+        validateLaunch({ name }, null, !!process.env.PI_SUBAGENT_ID);
+        if (getMuxBackend() !== "tmux") throw new Error("This hardened fork requires tmux");
         const { autoExit, interactive } = resolveResumeLaunchBehavior(params);
-        const startTime = Date.now();
-        const id = Math.random().toString(16).slice(2, 10);
-
         if (!isMuxAvailable()) {
           return muxUnavailableResult();
         }
-
         if (!existsSync(params.sessionPath)) {
           return {
             content: [
@@ -1789,177 +2072,100 @@ export default function subagentsExtension(pi: ExtensionAPI) {
             details: { error: "session not found" },
           };
         }
-
-        // Record entry count before resuming so we can extract new messages
-        const entryCountBefore = getNewEntries(params.sessionPath, 0).length;
-
-        const surface = createSurface(name);
-        await new Promise<void>((resolve) => setTimeout(resolve, getShellReadyDelayMs()));
-
-        // Build pi resume command
-        const parts = ["pi", "--session", shellEscape(params.sessionPath)];
-
-        // Load subagent-done extension so the agent can self-terminate if needed
-        const subagentDonePath = join(SUBAGENTS_DIR, "subagent-done.ts");
-        parts.push("-e", shellEscape(subagentDonePath));
-
-        const sessionId = ctx.sessionManager.getSessionId();
-        const artifactDir = getArtifactDir(ctx.sessionManager.getSessionDir(), sessionId);
-        const activityFile = getSubagentActivityFile(artifactDir, id);
-        mkdirSync(dirname(activityFile), { recursive: true });
-
-        let resumeMsgFile: string | undefined;
+        const adapter = getLifecycleAdapter();
+        const tmuxSocket = currentTmuxSocket();
+        const parentPane = process.env.TMUX_PANE;
+        if (!tmuxSocket || !parentPane) throw new Error("tmux socket/window identity is required");
+        const windowId = currentWindowId(tmuxSocket, parentPane, adapter);
+        const canonicalSession = canonicalizeSessionFile(params.sessionPath, adapter);
+        const expectedPiSessionId = readSessionHeaderId(canonicalSession, adapter);
+        const parentSessionId = ctx.sessionManager.getSessionId();
+        if (!parentSessionId) throw new Error("Parent session UUID unavailable");
+        const requested = requestedIdentity({}, null, ctx);
+        const artifactDir = getArtifactDir(ctx.sessionManager.getSessionDir(), parentSessionId);
+        const attemptId = randomUUID();
+        const activityFile = getSubagentActivityFile(artifactDir, attemptId);
+        const completionFile = join(artifactDir, "completions", `${attemptId}.json`);
+        mkdirSync(dirname(activityFile), { recursive: true, mode: 0o700 });
+        const promptArgs: string[] = [];
         if (params.message) {
           const msgTimestamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-          resumeMsgFile = join(
-            artifactDir,
-            "subagent-resume",
-            `${name
-              .toLowerCase()
-              .replace(/[^a-z0-9\s-]/g, "")
-              .replace(/\s+/g, "-")
-              .replace(/-+/g, "-")
-              .replace(/^-|-$/g, "") || "resume"}-${msgTimestamp}.md`,
-          );
-          mkdirSync(dirname(resumeMsgFile), { recursive: true });
+          const resumeMsgFile = join(artifactDir, "subagent-resume", `resume-${attemptId}-${msgTimestamp}.md`);
+          mkdirSync(dirname(resumeMsgFile), { recursive: true, mode: 0o700 });
           writeFileSync(resumeMsgFile, params.message, "utf8");
-          parts.push(shellEscape(`@${resumeMsgFile}`));
+          promptArgs.push(`@${resumeMsgFile}`);
         }
-
-        // Build env prefix — propagate PI_CODING_AGENT_DIR for config isolation
-        const resumeEnvParts: string[] = [];
-        if (process.env.PI_CODING_AGENT_DIR) {
-          resumeEnvParts.push(`PI_CODING_AGENT_DIR=${shellEscape(process.env.PI_CODING_AGENT_DIR)}`);
-        }
-        resumeEnvParts.push(`PI_SUBAGENT_NAME=${shellEscape(name)}`);
-        resumeEnvParts.push(`PI_SUBAGENT_SESSION=${shellEscape(params.sessionPath)}`);
-        resumeEnvParts.push(`PI_SUBAGENT_ID=${shellEscape(id)}`);
-        resumeEnvParts.push(`PI_SUBAGENT_ACTIVITY_FILE=${shellEscape(activityFile)}`);
-        if (autoExit) {
-          resumeEnvParts.push(`PI_SUBAGENT_AUTO_EXIT=1`);
-        }
-        const resumeEnvPrefix = resumeEnvParts.join(" ") + " ";
-
-        const command = `${resumeEnvPrefix}${parts.join(" ")}; echo '__SUBAGENT_DONE_'$?'__'`;
-        const launchScriptFile = join(
-          artifactDir,
-          "subagent-scripts",
-          `${name
-            .toLowerCase()
-            .replace(/[^a-z0-9\s-]/g, "")
-            .replace(/\s+/g, "-")
-            .replace(/-+/g, "-")
-            .replace(/^-|-$/g, "") || "resume"}-resume-${Date.now()}.sh`,
-        );
-        sendLongCommand(surface, command, {
-          scriptPath: launchScriptFile,
-          scriptPreamble: [
-            `# Subagent resume script for ${name}`,
-            `# Generated: ${new Date().toISOString()}`,
-            `# Session: ${params.sessionPath}`,
-            `# Surface: ${surface}`,
-            ...(resumeMsgFile ? [`# Resume message file: ${resumeMsgFile}`] : []),
-          ].join("\n"),
-        });
-
-        // Register as a running subagent for widget tracking
-        const running: RunningSubagent = {
-          id,
+        const launchScriptFile = join(artifactDir, "subagent-scripts", `resume-${attemptId}.sh`);
+        if (!registryFile) throw new Error("Worker registry path is not initialized");
+        const began = persistPreparingIntent({
+          registryPath: registryFile,
+          registry: { ...workerRegistry, invocations: invocationCount },
+          attemptId,
           name,
           task: params.message ?? "resumed session",
-          surface,
-          startTime,
-          sessionFile: params.sessionPath,
+          title: name,
+          repository: ctx.cwd,
+          parentSessionId,
+          sessionFile: canonicalSession,
           launchScriptFile,
-          activityFile,
+          completionFile,
+          tmuxSocket,
+          windowId,
+          requested,
           interactive,
-          statusState: createStatusState({
-            source: "pi",
-            startTimeMs: startTime,
-          }),
+          paneStartCommand: freezePaneStartCommand(launchScriptFile),
+          expectedPiSessionId,
+        }, adapter);
+        commitRegistry(began.registry, began.record);
+        const env: Record<string, string> = {
+          PI_SUBAGENT_NAME: name,
+          PI_SUBAGENT_SESSION: canonicalSession,
+          PI_SUBAGENT_COMPLETION_FILE: completionFile,
+          PI_SUBAGENT_TOKEN: began.record.completionToken,
+          PI_SUBAGENT_ID: began.record.attemptId,
+          PI_SUBAGENT_ACTIVITY_FILE: activityFile,
         };
-        runningSubagents.set(id, running);
+        if (autoExit) env.PI_SUBAGENT_AUTO_EXIT = "1";
+        if (process.env.PI_CODING_AGENT_DIR) env.PI_CODING_AGENT_DIR = process.env.PI_CODING_AGENT_DIR;
+        const dispatcherArgs = buildDispatcherArgs({
+          provider: requested.provider,
+          model: requested.model,
+          thinking: requested.thinking,
+          sessionFile: canonicalSession,
+          extensionPath: join(SUBAGENTS_DIR, "subagent-done.ts"),
+          repo: ctx.cwd,
+          promptArgs,
+        });
+        writeLaunchScript({
+          scriptPath: launchScriptFile,
+          attemptId: began.record.attemptId,
+          token: began.record.completionToken,
+          socket: tmuxSocket,
+          dispatcher: dispatcherPath(),
+          dispatcherArgs,
+          env,
+          preamble: [`Subagent resume script for ${name}`, `Session: ${canonicalSession}`].join("\n"),
+        }, adapter);
+        const splitReady = persistSplitRequested(registryFile, began.registry, began.record, freezePaneStartCommand(launchScriptFile), adapter);
+        commitRegistry(splitReady.registry, splitReady.record);
+        const launched = invokeSplit(registryFile, splitReady.registry, splitReady.record, adapter);
+        commitRegistry(launched.registry, launched.record);
+        const running = runningFromAttempt(launched.record, { activityFile, watcherGeneration });
+        runningSubagents.set(running.id, running);
         startWidgetRefresh();
         startStatusRefresh(pi);
-
-        // Fire-and-forget watcher
-        const watcherAbort = new AbortController();
-        running.abortController = watcherAbort;
-
-        watchSubagent(running, watcherAbort.signal)
-          .then((result) => {
-            updateWidget();
-
-            if (result.ping) {
-              const sessionRef = `\n\nSession: ${params.sessionPath}\nResume: pi --session ${params.sessionPath}`;
-              pi.sendMessage(
-                {
-                  customType: "subagent_ping",
-                  content: `Sub-agent "${result.ping.name}" needs help (${formatElapsed(result.elapsed)}):\n\n${result.ping.message}${sessionRef}`,
-                  display: true,
-                  details: {
-                    name: result.ping.name,
-                    message: result.ping.message,
-                    sessionFile: params.sessionPath,
-                  },
-                },
-                { triggerTurn: true, deliverAs: "steer" },
-              );
-              return;
-            }
-
-            const allEntries = getNewEntries(params.sessionPath, entryCountBefore);
-            const summary = findLastAssistantMessage(allEntries) ??
-              (result.errorMessage
-                ? `Subagent error: ${result.errorMessage}`
-                : result.exitCode !== 0
-                  ? `Resumed session exited with code ${result.exitCode}`
-                  : "Resumed session exited without new output");
-            const presentation = resolveResultPresentation(
-              { ...result, summary, sessionFile: params.sessionPath },
-              name,
-            );
-
-            pi.sendMessage(
-              {
-                customType: "subagent_result",
-                content: presentation,
-                display: true,
-                details: {
-                  name,
-                  task: params.message ?? "resumed session",
-                  exitCode: result.exitCode,
-                  elapsed: result.elapsed,
-                  sessionFile: params.sessionPath,
-                  ...(result.errorMessage ? { errorMessage: result.errorMessage } : {}),
-                },
-              },
-              { triggerTurn: true, deliverAs: "steer" },
-            );
-          })
-          .catch((err) => {
-            updateWidget();
-            pi.sendMessage(
-              {
-                customType: "subagent_result",
-                content: `Resume error: ${err?.message ?? String(err)}`,
-                display: true,
-                details: { name, error: err?.message },
-              },
-              { triggerTurn: true, deliverAs: "steer" },
-            );
-          });
-
+        attachWatcher(running, pi);
         return {
           content: [{ type: "text", text: `Session "${name}" resumed.` }],
           details: {
-            id,
+            id: running.id,
             name,
-            sessionPath: params.sessionPath,
+            sessionPath: canonicalSession,
             launchScriptFile,
             status: "started",
           },
         };
+
       },
     });
 
@@ -2005,6 +2211,94 @@ export default function subagentsExtension(pi: ExtensionAPI) {
     },
   });
 
+  pi.registerCommand("subagent-release", {
+    description: "Release or close a worker pane: /subagent-release <attemptId>",
+    handler: async (args, ctx) => {
+      const attemptId = args.trim();
+      if (!attemptId) {
+        ctx.ui.notify("Usage: /subagent-release <attemptId>", "warning");
+        return;
+      }
+      const record = workerRegistry.workers.find((worker) => worker.attemptId === attemptId);
+      if (!record) {
+        ctx.ui.notify(`Unknown attempt ${attemptId}`, "error");
+        return;
+      }
+      if (!registryFile || !registryReady) {
+        ctx.ui.notify("Registry unavailable", "error");
+        return;
+      }
+      if (classifySocket(record, currentTmuxSocket()) === "foreign") {
+        ctx.ui.notify("Foreign-socket workers cannot be released from this session (zero tmux calls).", "error");
+        return;
+      }
+      const release = await ctx.ui.confirm("Release without closing? Pane survives as yours.", record.attemptId);
+      if (release) {
+        try {
+          const next = releaseWithoutClose(registryFile, workerRegistry, record);
+          commitRegistry(next.registry, next.record);
+          runningSubagents.delete(record.attemptId);
+          updateWidget();
+          ctx.ui.notify(`Released ${attemptId} without closing`, "info");
+        } catch (error: any) {
+          ctx.ui.notify(error?.message ?? String(error), "error");
+        }
+        return;
+      }
+      const closeFirst = await ctx.ui.confirm("Close and kill the pane instead?", record.attemptId);
+      if (!closeFirst) return;
+      const closeSecond = await ctx.ui.confirm("Really kill this worker pane? This cannot be undone.", record.surface ?? attemptId);
+      if (!closeSecond) return;
+      try {
+        const next = closeOwned(registryFile, workerRegistry, record);
+        commitRegistry(next.registry, next.record);
+        runningSubagents.delete(record.attemptId);
+        updateWidget();
+        ctx.ui.notify(`Closed ${attemptId}`, "info");
+      } catch (error: any) {
+        ctx.ui.notify(error?.message ?? String(error), "error");
+      }
+    },
+  });
+
+  pi.registerCommand("subagents-diagnose", {
+    description: "Show worker registry diagnostics and pending deliveries",
+    handler: async (_args, ctx) => {
+      const loaded = registryFile ? loadRegistry(registryFile) : { status: "missing" as const, registry: workerRegistry };
+      const text = diagnoseText(loaded.status === "invalid" ? loaded : loaded, workerRegistry.workers);
+      ctx.ui.notify(text.slice(0, 500), registryValidationError ? "error" : "info");
+      console.log(text);
+    },
+  });
+
+  pi.registerCommand("subagents-replay", {
+    description: "Explicitly replay an uncertain worker outcome: /subagents-replay <attemptId>",
+    handler: async (args, ctx) => {
+      const attemptId = args.trim();
+      const running = runningSubagents.get(attemptId);
+      const record = running?.attempt ?? workerRegistry.workers.find((worker) => worker.attemptId === attemptId);
+      if (!record || !record.outcomeBytes) {
+        ctx.ui.notify("No pending/uncertain outcome to replay", "warning");
+        return;
+      }
+      if (!running) {
+        ctx.ui.notify("Attempt is not currently watched in this session", "warning");
+        return;
+      }
+      const data = JSON.parse(record.outcomeBytes);
+      const replayRecord = { ...record, deliveryState: "pending" as const };
+      // Durable outbox (B3): persist `pending` BEFORE the replay send, not
+      // only in memory. Otherwise a crash between marking pending and the
+      // actual pi.sendMessage call leaves no on-disk trace that a replay was
+      // even attempted.
+      if (!registryFile) throw new Error("Worker registry path is not initialized");
+      const persisted = persistRecord(registryFile, workerRegistry, replayRecord);
+      commitRegistry(persisted, replayRecord, running);
+      deliverAuthenticatedOutcome(pi, running, replayRecord, data);
+      ctx.ui.notify(`Replayed reported outcome (authenticated, unverified) for ${attemptId}`, "info");
+    },
+  });
+
   // ── subagent_result message renderer ──
   pi.registerMessageRenderer("subagent_result", (message, options, theme) => {
     const details = message.details as any;
@@ -2020,14 +2314,17 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         const bgFn = failed
           ? (text: string) => theme.bg("toolErrorBg", text)
           : (text: string) => theme.bg("toolSuccessBg", text);
+        // P2-3: a worker's own `done` is an authenticated *report*, not an
+        // independently verified completion. Never render it as a plain
+        // success checkmark + "completed".
         const icon = failed
           ? theme.fg("error", "✗")
-          : theme.fg("success", "✓");
+          : theme.fg("warning", "◌");
         const status = errorMessage
           ? "failed (provider/agent error)"
           : failed
             ? `failed (exit ${exitCode})`
-            : "completed";
+            : "reported done — unverified";
         const agentTag = details.agent ? theme.fg("dim", ` (${details.agent})`) : "";
 
         const header = `${icon} ${theme.fg("toolTitle", theme.bold(name))}${agentTag} ${theme.fg("dim", "—")} ${status} ${theme.fg("dim", `(${elapsed})`)}`;

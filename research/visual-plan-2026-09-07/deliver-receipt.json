@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "ok": true,
+  "command": "deliver",
+  "type": "lifecycle",
+  "input": "/tmp/hazat-review/visual/worker-attempt.lifecycle.json",
+  "output": "/tmp/hazat-review/visual/worker-attempt-lifecycle.html",
+  "specification": {
+    "sha256": "d5f444aff6eaa62566728454e81ec88065bcec6cee949568659917c6bfae230e",
+    "bytes": 5526
+  },
+  "artifact": {
+    "sha256": "462c42939d1ed0d2b9a301b48f3692a75cfda8ec78badca3d4af43708c26f871",
+    "bytes": 720144
+  },
+  "validation": {
+    "checksPassed": 9,
+    "checkCount": 9,
+    "compositionProfile": "showcase",
+    "compositionStatus": "pass",
+    "errors": 0,
+    "warnings": 0
+  }
+}

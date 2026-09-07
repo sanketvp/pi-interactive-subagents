@@ -1,0 +1,25 @@
+{
+  "visual_plan_required": true,
+  "visual_plan_mode": "local_files",
+  "visual_plan_renderer": "archify",
+  "visual_plan_type": "lifecycle",
+  "visual_plan_source": "/Users/sanketpatel/GIT/Personal/sanketvp/pi-interactive-subagents/research/visual-plan-v3-2026-09-07/worker-attempt-v3.lifecycle.json",
+  "visual_plan_artifact": "/Users/sanketpatel/GIT/Personal/sanketvp/pi-interactive-subagents/research/visual-plan-v3-2026-09-07/worker-attempt-v3-lifecycle.html",
+  "artifact_sha256": "733626074aac9109c6c4ff7c5a25dd1cb6138ad55ccd8a76f707875633ba1e4a",
+  "visual_plan_validation_receipt": "/Users/sanketpatel/GIT/Personal/sanketvp/pi-interactive-subagents/research/visual-plan-v3-2026-09-07/deliver-receipt.json",
+  "visual_plan_visual_check_receipt": "/Users/sanketpatel/GIT/Personal/sanketvp/pi-interactive-subagents/research/visual-plan-v3-2026-09-07/visual-check-receipt.json",
+  "visual_plan_validation_status": "passed",
+  "visual_plan_visual_check_status": "failed",
+  "visual_plan_approval_status": "approved",
+  "approved_by": "PM",
+  "visual_plan_source_task": "task_e770c67cc6e3",
+  "visual_plan_scope": [
+    "tmux worker creation identity",
+    "resource/outcome separation",
+    "retention and delivery recovery"
+  ],
+  "approval_evidence": "Coordinator directly inspected exact-hash 1440x900 light and 2048x1320 dark screenshots with image reader. All resource states and side-channel relationships legible; creation metadata, retained capacity, outcome independence and exit gating agree with Sol binding corrections and v3 addendum. Explicit exception for local review: vertical scrolling remains at desktop sizes; supporting cards/legend extend below first screen. This is NOT a screen-fit/polish pass. Automatic visualReview remains pending; no renderer changes or environmental-cause claims. Implementation only, not rollout approval.",
+  "open_questions": [],
+  "visual_recap_required": true,
+  "visual_recap_artifact": null
+}

@@ -1,0 +1,70 @@
+{
+  "version": 1,
+  "scope": "code only; excludes auth, account data, settings, sessions, and user-owned Orca extensions",
+  "files": [
+    {
+      "path": "extensions/unbounded-scan-guard.ts",
+      "sha256": "0f2c9089d76abba1c4f74fdfcd2995e9800e3bab5f608a42425013099b28fd7d"
+    },
+    {
+      "path": "extensions/pi-dispatch-mandate-guard.ts",
+      "sha256": "18f23e825bd13fcf560fda090595ddbb6478791fb6137d7a8b47afb2a4cbde37"
+    },
+    {
+      "path": "extensions/pi-orca-route.ts",
+      "sha256": "8d4a86ef0edb4ce97f97f1184d72c156b5620d46389794d2bb1f085d6eae92f6"
+    },
+    {
+      "path": "extensions/pi-orchestration/index.ts",
+      "sha256": "85afdae7e41960084194c2c8206cdd206c3dc10cc2ae0831414edbdedc4a4ccb"
+    },
+    {
+      "path": "extensions/pi-orchestration/policy.ts",
+      "sha256": "f46dac406800bdf1ddac72f4a74e5a47b01c92cf961454f316ac038c2089838a"
+    },
+    {
+      "path": "extensions/anthropic-pool/auth-flow.ts",
+      "sha256": "f30d1f6b0f1fcdfb1dd287b782a3f3fbeeac37a2ceac1e9f1db638f19376ea5a"
+    },
+    {
+      "path": "extensions/anthropic-pool/constants.ts",
+      "sha256": "807f63546030d1c8d84555033babcc2cb7f21ee588dfc5e03cb92cc81deac6a7"
+    },
+    {
+      "path": "extensions/anthropic-pool/host-transport.ts",
+      "sha256": "187ae1bce6f264cc5e202f3bdd326d2db28a451adee44d02594e0327200b57c2"
+    },
+    {
+      "path": "extensions/anthropic-pool/index.ts",
+      "sha256": "7984e29360e16fb79c1749eab76ad04686eabd3b01cc151039ed46fb297ce289"
+    },
+    {
+      "path": "extensions/anthropic-pool/pool-store.ts",
+      "sha256": "b7273cc37a8973e16a2b2427535472ecb3ec76bbf90d8e4f8c3967b01e8061f5"
+    },
+    {
+      "path": "extensions/anthropic-pool/pool-transport.ts",
+      "sha256": "c8e6bd7b16fa508c2976c26bf3aa6ac48b683e8bd07fc249492289963b62f573"
+    },
+    {
+      "path": "extensions/anthropic-pool/request-shaping.ts",
+      "sha256": "b31e1790a2bb0ee98e2fd02e8716befbaf7efc1830152e717dd6674b9bf96b4b"
+    },
+    {
+      "path": "extensions/anthropic-pool/session-id-lines.ts",
+      "sha256": "1897f26ac243bff14a6d184b27ed03b68a38ad878de64e50f3bdae810fadab2a"
+    },
+    {
+      "path": "extensions/anthropic-pool/system-prompt-shaping.ts",
+      "sha256": "08eb6c17c64cb47991727b47d2b61682ee6c90ee56571cc0865fcfcdbf1284e5"
+    },
+    {
+      "path": "extensions/anthropic-pool/types.ts",
+      "sha256": "7af5ae5ef5cac26c9cbd585814e19039d48e1be65272dc4699c916e4e077b21e"
+    },
+    {
+      "path": "extensions/anthropic-pool/usage-tracker.ts",
+      "sha256": "2f43c718ba8516704f7f4039593c752ab45b03507713256b2a4d269796aa463b"
+    }
+  ]
+}

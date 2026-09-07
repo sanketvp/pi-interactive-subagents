@@ -1,0 +1,38 @@
+{
+  "implementationVerdict": "REVISE",
+  "deploymentReady": false,
+  "modelInvocations": 16,
+  "automaticRetriesStopped": true,
+  "review": "/Users/sanketpatel/DEV_vault/09-Claude-Config/learning/reviews/pi-tmux-run16-final-codex-review-2026-09-07.md",
+  "reviewSha256": "12f2a00dded20a6216c74fcbce20ed14f03e6c0ba1dd7d3de44739803064a233",
+  "tests": {
+    "project": {
+      "pass": 183,
+      "fail": 0,
+      "exit": 0
+    },
+    "dispatcherFixtureExit": 0,
+    "shellcheckExit": 0,
+    "typecheck": "not run",
+    "livePiTuiProviderTrials": "not run"
+  },
+  "blockingFindings": [
+    "Enforce established child UUID on post-start error and exit receipts",
+    "Contain all snapshot capture outputs including manifest and symlinked descendants"
+  ],
+  "sourceHashes": {
+    "/Users/sanketpatel/GIT/Personal/sanketvp/pi-interactive-subagents/pi-extension/subagents/hardening.ts": "fad62153a27c3bb12cab8078554ed43c02de0acf544c3bd61fb1fcd480ed8888",
+    "/Users/sanketpatel/GIT/Personal/sanketvp/pi-interactive-subagents/pi-extension/subagents/status.ts": "85e563db0d1e135e75883e3f59d5ffca6448b4a3dbd8af0a37da8efc4d412b41",
+    "/Users/sanketpatel/GIT/Personal/sanketvp/pi-interactive-subagents/pi-extension/subagents/cmux.ts": "77136e71a5f882b7543dea61b2d9ce1f52a23e9ea20551efe745b41b161b7e71",
+    "/Users/sanketpatel/GIT/Personal/sanketvp/pi-interactive-subagents/pi-extension/subagents/lifecycle.ts": "1d62679a53ff2ac396cd12e58e0d1c66b3d722503c1cc6e5d549e81b66439a6c",
+    "/Users/sanketpatel/GIT/Personal/sanketvp/pi-interactive-subagents/pi-extension/subagents/session.ts": "4d3b4f08bc4ab1285bc857a91b3924c699fdf4298ef11a828f1bbabe34f80078",
+    "/Users/sanketpatel/GIT/Personal/sanketvp/pi-interactive-subagents/pi-extension/subagents/activity.ts": "56d33889b5250f333309c6d10847dcb2123ba74bf5b1ae1a694f255b4d034905",
+    "/Users/sanketpatel/GIT/Personal/sanketvp/pi-interactive-subagents/pi-extension/subagents/subagent-done.ts": "e0b878f8625da0f1c697b8792be0d27b922003164b42629dac9e21b7907eaade",
+    "/Users/sanketpatel/GIT/Personal/sanketvp/pi-interactive-subagents/pi-extension/subagents/adapter.ts": "7410a74aaad4fe9b1a747d952b84b444936a519e718637b2a1ad185ff871f232",
+    "/Users/sanketpatel/GIT/Personal/sanketvp/pi-interactive-subagents/pi-extension/subagents/registry.ts": "6b116b640c4e3795eaf1a00f4620c2bc394da6e88b68313b0df7eec00f736c3c",
+    "/Users/sanketpatel/GIT/Personal/sanketvp/pi-interactive-subagents/pi-extension/subagents/index.ts": "535bdcf11490f1404dad84902a7c4f16c8613030a69d8139d89eecf2bf0b85a1",
+    "/Users/sanketpatel/GIT/Personal/sanketvp/pi-interactive-subagents/pi-extension/subagents/completion.mjs": "f668c2c32eb337193249a0548f8a503068d34e8fb3a85794fb87abd3bc5c185d",
+    "/Users/sanketpatel/GIT/Personal/sanketvp/pi-interactive-subagents/scripts/host-customizations.mjs": "778205f65207276b882a72659a50b2e2147baede4567195da31d8adc30ea00a6",
+    "/Users/sanketpatel/.claude/scripts/pi-dispatch.sh": "8944cdca5c33eec0139f664143a9f71388600840cca04d41943af3d3a2147a66"
+  }
+}

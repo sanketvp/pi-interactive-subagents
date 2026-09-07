@@ -1,0 +1,229 @@
+{
+  "schema_version": 1,
+  "diagram_type": "lifecycle",
+  "meta": {
+    "title": "Pi Interactive Worker Attempt Lifecycle",
+    "output": "worker-attempt-lifecycle.html",
+    "viewBox": [
+      980,
+      660
+    ],
+    "quality_profile": "showcase"
+  },
+  "lanes": [
+    {
+      "id": "main",
+      "label": "Attempt phases (durable registry)"
+    },
+    {
+      "id": "retained",
+      "label": "Retained states (count toward 4-live cap)"
+    },
+    {
+      "id": "terminal",
+      "label": "Exit and verification"
+    }
+  ],
+  "states": [
+    {
+      "id": "intent",
+      "type": "start",
+      "label": "Intent Persisted",
+      "sublabel": "registry write, budget +1",
+      "lane": "main",
+      "col": 0,
+      "step": "01",
+      "tag": "creating"
+    },
+    {
+      "id": "creating",
+      "type": "active",
+      "label": "Creating Pane",
+      "sublabel": "bootstrap tags own pane",
+      "lane": "main",
+      "col": 1,
+      "step": "02",
+      "tag": "tmux"
+    },
+    {
+      "id": "launching",
+      "type": "active",
+      "label": "Launching",
+      "sublabel": "via pi-dispatch.sh",
+      "lane": "main",
+      "col": 2,
+      "step": "03",
+      "tag": "dispatcher"
+    },
+    {
+      "id": "running",
+      "type": "active",
+      "label": "Running",
+      "sublabel": "receipt: UUID + model",
+      "lane": "main",
+      "col": 3,
+      "step": "04",
+      "tag": "receipt"
+    },
+    {
+      "id": "reported",
+      "type": "decision",
+      "label": "Reported Outcome",
+      "sublabel": "authenticated, unverified",
+      "lane": "main",
+      "col": 4,
+      "step": "05",
+      "tag": "outcome"
+    },
+    {
+      "id": "unknown",
+      "type": "waiting",
+      "label": "Unknown",
+      "sublabel": "watcher fault; kept",
+      "lane": "retained",
+      "col": 0,
+      "tag": "kept"
+    },
+    {
+      "id": "taken-over",
+      "type": "waiting",
+      "label": "Taken Over",
+      "sublabel": "user owns pane",
+      "lane": "retained",
+      "col": 1,
+      "tag": "user"
+    },
+    {
+      "id": "foreign",
+      "type": "waiting",
+      "label": "Foreign Completed",
+      "sublabel": "other socket; held",
+      "lane": "retained",
+      "col": 0,
+      "tag": "held",
+      "yOffset": 90
+    },
+    {
+      "id": "failed-no-surface",
+      "type": "failure",
+      "label": "Failed, No Pane",
+      "sublabel": "proven absent; slot freed",
+      "lane": "terminal",
+      "col": 0,
+      "tag": "budget kept"
+    },
+    {
+      "id": "released",
+      "type": "neutral",
+      "label": "Released",
+      "sublabel": "UI-confirmed; token",
+      "lane": "terminal",
+      "col": 1,
+      "tag": "human gate"
+    },
+    {
+      "id": "verified",
+      "type": "success",
+      "label": "Verified",
+      "sublabel": "independent Sonnet/CI",
+      "lane": "terminal",
+      "col": 2,
+      "tag": "separate step"
+    }
+  ],
+  "transitions": [
+    {
+      "id": "launching-unknown",
+      "from": "launching",
+      "to": "unknown",
+      "label": "watcher fault",
+      "route": "drop"
+    },
+    {
+      "id": "running-taken-over",
+      "from": "running",
+      "to": "taken-over",
+      "label": "user takeover",
+      "route": "drop"
+    },
+    {
+      "id": "unknown-running",
+      "from": "unknown",
+      "to": "running",
+      "label": "reconcile re-attach",
+      "variant": "emphasis",
+      "labelDy": 24
+    },
+    {
+      "id": "unknown-foreign",
+      "from": "unknown",
+      "to": "foreign",
+      "label": "completion on other socket",
+      "route": "drop",
+      "labelDy": 14
+    },
+    {
+      "id": "creating-failed",
+      "from": "creating",
+      "to": "failed-no-surface",
+      "label": "tag failed, no dispatch",
+      "variant": "security",
+      "labelDx": -60
+    },
+    {
+      "id": "taken-over-released",
+      "from": "taken-over",
+      "to": "released",
+      "label": "double UI confirm",
+      "variant": "security",
+      "route": "drop"
+    },
+    {
+      "id": "foreign-released",
+      "from": "foreign",
+      "to": "released",
+      "label": "exact-socket proof",
+      "labelAt": [
+        481,
+        440
+      ]
+    },
+    {
+      "id": "reported-verified",
+      "from": "reported",
+      "to": "verified",
+      "label": "independent check",
+      "variant": "dashed",
+      "route": "drop"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Persist Before Effects",
+      "items": [
+        "The intent record and invocation budget commit in one atomic registry write before any pane exists",
+        "The pane bootstrap tags its own $TMUX_PANE as its first action or exits; no unmarked interactive pane",
+        "Recovery scans only the recorded socket and window for the exact token; no heuristic pane claiming"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "Unified Dispatcher Boundary",
+      "items": [
+        "Every child invokes pi-dispatch.sh --interactive; print mode stays the untouched default",
+        "Arguments pass as arrays with explicit provider; never eval",
+        "Requested and observed provider/model are both recorded from the child startup receipt"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "Retention and Verification",
+      "items": [
+        "Taken-over, unknown, and foreign states keep counting toward the four-live cap",
+        "Closing a taken-over pane requires interactive UI confirmation; an LLM tool can only request it",
+        "A reported outcome is authenticated but unverified; task verification is separate independent evidence"
+      ]
+    }
+  ]
+}

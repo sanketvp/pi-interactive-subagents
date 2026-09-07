@@ -1,0 +1,144 @@
+RESULT-SOURCE.TXT — TARGETED ARCHIVE SOURCE PASS (invocation 5/12)
+Instance: catalog-verification-sonnet | Model: claude-sonnet-5 (medium)
+Prior result.txt is preserved as raw superseded output, not rewritten.
+Scope: published ARCHIVES only (not GitHub HEAD) for @tintinweb/pi-subagents 0.19.0,
+pi-subagents 0.66.0, pi-terminal-mux 0.4.1, @narumitw/pi-sync 0.50.0.
+
+CORRECTION TO PRIOR PASS: that pass treated "*"/broad peerDependency ranges as proof of fit and
+recommended dropping existing code. Declared ranges are compatibility CLAIMS only, never runtime
+proof. No "safe to adopt" label is given here to any of these four packages; all are untested
+arbitrary code from this lane's view.
+
+METHOD/INTEGRITY: 4 tarballs fetched from registry.npmjs.org dist.tarball URLs (the 4 allowed GETs).
+sha1 of each downloaded file matched the registry `dist.shasum` exactly before any read:
+tintinweb 0.19.0=2af9a4b4..., pi-subagents 0.66.0=1a2cb326..., pi-terminal-mux 0.4.1=290a32c9...,
+pi-sync 0.50.0=eeaa732b... (full values in archives/ and prior transcript). Read via Python
+`tarfile`, regular-file members only (`TarInfo.isreg()`), no extractall, no symlink/hardlink
+follow, no `..`/absolute paths present in any listing (183/313/26/179 members respectively).
+
+FINDING 1 — SUBPROCESS/RPC OVERLAY vs ACTUAL TMUX PANES (source-proven)
+@tintinweb/pi-subagents 0.19.0: package.json deps = typebox/@sinclair/typebox, croner, nanoid —
+NO tmux/mux dependency. `src/agent-runner.ts` imports `createAgentSession`, `SessionManager`,
+`SettingsManager` from `@earendil-works/pi-coding-agent` directly; `src/child-context.ts` marks
+subagent work via `AsyncLocalStorage` "so concurrent top-level extension work is unaffected."
+PROVEN: subagents run as extra in-process Agent Sessions in the SAME process as the parent — no
+terminal-multiplexer code path exists in this version.
+
+pi-subagents 0.66.0 (nicobailon): package.json deps = `@earendil-works/pi-server` pinned exactly
+"0.85.0", acorn, jiti, typebox, undici, yaml — again NO tmux/mux dependency. `src/runs/shared/
+child-launch.ts` names its own path `BuildInProcessChildLaunchInput`/`InProcessChildLaunch` with a
+`host: "parent" | "runner"` field; comment: "the parent never loads ambient extensions... (it shares
+its process with the parent session); the runner loads ambient extensions..." The "runner" is a
+detached background Node process: `src/runs/background/owned-process-tree.ts` uses
+`node:child_process.spawnSync` + POSIX process-group signaling (`process.kill(-pid,"SIGTERM")`,
+verified via polling `ps -axo pid=,pgid=,stat=`). `process-terminal.ts` persists writer/runner exit
+state as JSON (`process-terminal.json`) for crash-safe reconciliation. PROVEN: real OS process-group
+ownership and crash-observable exit tracking, but the child is a detached background process, not a
+tmux pane. `@earendil-works/pi-server@0.85.0`'s role was not inspected this pass — UNKNOWN.
+
+pi-terminal-mux 0.4.1: `src/backends/tmux.ts` (full file, 3124 bytes) is the ONLY package here that
+issues real tmux commands: `createSplit()` runs `tmux split-window -d [-h|-v] [-b] -t <fromSurface>
+-P -F "#{pane_id}"` — `-d` is tmux's documented "don't switch to the new pane" flag, matching the
+live-tested "unchanged active pane" requirement, addressed by explicit pane_id. `send()` uses
+`send-keys -l <cmd>` + Enter; `sendEscape()` sends Escape (interrupt, not kill); `close()` runs
+`tmux kill-pane -t <surface>` — an IMMEDIATE, unconditional kill with no grace/drain/confirm logic
+in this file. Not depended on by either subagent package inspected this pass.
+CONCLUSION 1: Neither re-inspected subagent package creates real tmux panes; only pi-terminal-mux
+0.4.1 has proven `split-window -d`/`kill-pane` primitives, and it is a bare library with no
+dispatcher, no lifecycle policy, no completion/steering logic.
+
+FINDING 2 — SESSION PATHS, STEERING, ABORT/RESUME
+tintinweb 0.19.0: `src/abortable.ts` (full, 1409 bytes) — Esc during `get_subagent_result`
+"cancels only the caller's wait; the background child keeps running and its result stays
+unconsumed" (verbatim). Not a kill/cleanup mechanism. A `steer_subagent` tool name exists in
+`agent-runner.ts`'s SUBAGENT_TOOL_NAMES export; its message-injection implementation was not read
+this pass — UNKNOWN beyond the name.
+
+pi-subagents 0.66.0: `src/runs/shared/abort-recovery.ts` (full constants) defines resume via a
+fixed prompt ("...Continue from the current files and transcript. Do not restart...") triggered by
+regex-classified provider/transport aborts (`PROVIDER_ABORT_PATTERN`) vs tool failures
+(`TOOL_FAILURE_PREFIX`) — a real CHILD-run resume path, not a parent-session reload contract.
+`completion-guard.ts` (partial, ~2.5KB/12.8KB) shows regex/text-heuristic completion classification
+(e.g. `NO_BETTER_CHANGE_NEEDED_PATTERN`) over model output text, not exit-code/test verification —
+consistent with, but not conclusively proving, the "weak completion" concern from the brief; full
+file not read — UNKNOWN in full. No file in either package documents PARENT-session
+reload/crash-recovery of the orchestrator itself (only child-process cleanup) — UNKNOWN, not proven
+absent.
+
+FINDING 3 — pi-sync 0.50.0: DOES IT REPLACE CODE-ONLY RECOVERY SNAPSHOTS?
+Source: `docs/settings.md` (~11KB of 13169 bytes read, v0.50.0). Facts:
+- Credentials live only in `~/.pi/agent/pi-sync.json`, created atomically at mode `0600`; "never
+  shown in menus, reviews, status, notifications, errors, logs, or completion metadata" (verbatim).
+- Every snapshot explicitly excludes "pi-sync.json, storage credentials, automatic-sync
+  preferences, or setup names" (verbatim) — credentials are structurally excluded from sync payload.
+- `sync.include` is a fixed allow-list: settings.json, keybindings.json, models.json, AGENTS.md,
+  APPEND_SYSTEM.md, skills, prompts, themes, extensions, sessions (+ safe custom paths); absolute
+  paths, `..`, and "denied secret/settings paths" rejected. "sessions" is opt-in, absent from the
+  documented Minimal preset (settings.json + AGENTS.md); Recommended covers nine non-session roots.
+  ODV memory files are outside this Pi-root allow-list entirely, so no memory-sync collision by
+  design in this version.
+- Destinations are exclusively remote: S3/R2, Git (SSH/HTTPS), WebDAV — NO local-only backend
+  documented. Cannot substitute for a local-only recovery snapshot without provisioning one of these.
+- Overwrite safety: "an existing branch containing unrelated files is rejected rather than
+  overwritten"; "two setups cannot resolve to the same normalized backend location"; pushes go
+  through review (Save/Discard/Continue editing); secret scanning defaults ON.
+ANSWER: pi-sync does not create credential/memory conflicts for the documented default scope
+(credentials excluded, sessions opt-in, allow-list stays inside Pi's own roots). It does NOT
+replace a local-only code-only snapshot: no local backend exists, and scope is fixed to a curated
+Pi-root list, not general-purpose backup — coverage vs. the existing snapshot's actual scope is
+UNKNOWN without a direct diff.
+
+CAN EITHER SUBAGENT PACKAGE + TERMINAL-MUX REPLACE THE LOCAL HazAT FORK WITHOUT REBUILDING THE
+WHOLE DISPATCHER? NO, not as inspected. tintinweb has zero multiplexer code (architecturally
+incompatible with real tmux panes, not a config gap). pi-subagents 0.66.0 has zero multiplexer
+dependency either; its detached-runner is closer in spirit (real process-group ownership) but would
+need new integration code to attach output to an actual tmux pane. pi-terminal-mux 0.4.1 has the
+only proven real `split-window -d`/`kill-pane`/`send-keys`/`capture-pane` primitives but no agent
+lifecycle, resume, completion, or steering logic of its own — using it still requires writing
+essentially the dispatcher the HazAT fork provides.
+
+WHAT STILL NEEDS ADAPTATION
+1. A cleanup/lifecycle POLICY layer around pi-terminal-mux's `close()` (currently unconditional
+   kill-pane) — grace period, drain, confirmation are all caller responsibilities.
+2. Steering/resume semantics comparable to `abort-recovery.ts`'s pattern, ported/reimplemented for a
+   real-pane-backed child (neither existing implementation targets a tmux pane).
+3. Completion validation stronger than the observed text-heuristic pattern matching — not confirmed
+   resolved in the portion read.
+4. Parent-reload/crash recovery for the orchestrator itself — unaddressed in all four archives as
+   read this pass.
+
+SHOULD THE LOCAL HazAT FORK STAY PAUSED? Yes, on this evidence. No package here is a validated
+drop-in: two have architectures (in-process / detached-subprocess) that don't match the live-tested
+tmux-pane requirement; the one package with real tmux primitives is a bare library. Remaining
+paused pending a deliberate build-vs-reuse decision is the conservative choice.
+
+NO removal of existing backup/footer/pinning code is recommended from this pass; pi-sync's
+remote-only, allow-listed scope is additive at best, not a proven full substitute.
+
+BLOCKING SOURCE ISSUES: (a) pi-terminal-mux 0.4.1 `close()` has no grace/drain semantics; (b)
+`@earendil-works/pi-server@0.85.0` exact pin in pi-subagents 0.66.0 not inspected — role/stability
+UNKNOWN; (c) `completion-guard.ts` only ~20% read — full validation logic UNKNOWN; (d) no
+parent-reload contract found in either subagent package — UNKNOWN, not assumed absent.
+
+HIGHEST-VALUE NEXT ACCEPTANCE TEST: in an explicitly authorized live test (not this lane), call
+pi-terminal-mux's `createSplit("test","right")` inside the existing live tmux/Orca setup and confirm
+active pane/tab stay unchanged (source strongly suggests yes via `-d`, needs live confirmation),
+then test `close()` under a simulated hang, then evaluate whether a new/ported dispatcher can sit on
+top without adopting either subagent package's in-process/subprocess architecture.
+
+CHECKS/EXIT CODES: 4/4 curl downloads HTTP 200, exit 0. 4/4 sha1 matched registry `dist.shasum`
+exactly. tarfile enumeration: 183/313/26/179 members, all regular files, no symlinks/traversal.
+Total archive/network requests this pass: 4 (max allowed).
+
+SOURCES CHECKED (file:member): (1) tintinweb-0.19.0.tgz → package.json, src/child-context.ts,
+src/agent-runner.ts (partial), src/abortable.ts (full). (2) pi-subagents-0.66.0.tgz → package.json,
+src/runs/shared/child-launch.ts (partial), src/runs/background/process-terminal.ts (partial),
+src/runs/background/owned-process-tree.ts (partial), src/runs/shared/completion-guard.ts (partial),
+src/runs/shared/abort-recovery.ts (full constants). (3) pi-terminal-mux-0.4.1.tgz →
+src/backends/tmux.ts (full). (4) pisync-0.50.0.tgz → docs/settings.md (~11KB/13169 bytes).
+
+LESSON: metadata (peerDependency ranges, README claims) told a materially more favorable story than
+the shipped source for both subagent packages — neither has any real terminal-multiplexer code path
+despite being catalog "subagent" extensions plausible for a tmux-pane use case. Only reading the
+actual dependency list and backend implementation revealed the in-process/subprocess distinction
+this task required; declared compatibility ranges are necessary but not sufficient evidence.

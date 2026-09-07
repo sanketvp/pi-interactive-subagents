@@ -1,0 +1,22 @@
+[
+  {
+    "file": "tintinweb-0.19.0.tgz",
+    "sha256": "0c4c9416750027f5e18aef663975827ecc63bd4969a207c3dd0abde7e6bd61de",
+    "bytes": 688859
+  },
+  {
+    "file": "terminalmux-0.4.1.tgz",
+    "sha256": "0434db1e82c36d6e2cbefc799e79e636d31388ff45da2ad576a6c29f64aabcc3",
+    "bytes": 50206
+  },
+  {
+    "file": "pisync-0.50.0.tgz",
+    "sha256": "aa6d2dd7d7a3f6bd47c12f6d7749999ed993ee2786b02e2751fcace76be62722",
+    "bytes": 438435
+  },
+  {
+    "file": "pisubagents-0.66.0.tgz",
+    "sha256": "d4caacf07519bae2be40ee684b55e04c11f58d5542ffc086483adbbdb8ed264e",
+    "bytes": 1282614
+  }
+]
