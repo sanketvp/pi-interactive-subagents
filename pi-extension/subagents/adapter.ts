@@ -25,10 +25,78 @@ export interface LifecycleFs {
   statSync: typeof statSync;
 }
 
+/** Native-addon wrappers; real implementations land in PR-3. Fakeable no-ops in PR-1. */
+export interface ConfinedSpawnResult {
+  pid: number;
+  stdout: Buffer;
+  stderr?: Buffer;
+  status: number;
+}
+
+export interface SandboxAdapter {
+  available(): boolean;
+  /**
+   * Exclusive execution path when `available()` is true. Callers MUST use this
+   * result as the process output and MUST NOT also exec `argv` themselves.
+   * When `available()` is false the caller runs unconfined (shadow).
+   */
+  spawnConfined?(
+    kind: string,
+    argv: string[],
+    opts?: { cwd?: string; env?: NodeJS.ProcessEnv; writeRoots?: string[]; input?: string | Buffer },
+  ): ConfinedSpawnResult;
+}
+
+export interface SocketAdapter {
+  listen?(path: string, handler: (msg: unknown) => unknown | Promise<unknown>): { close: () => void };
+  send?(path: string, msg: unknown): void;
+}
+
+export interface ProcAdapter {
+  peerPid?(fd: number): number;
+  procInfo?(pid: number): { ppid: number; uid: number; startSec: number; startUsec: number } | null;
+  procArgs?(pid: number): string | null;
+}
+
+export function createNoopSandboxAdapter(): SandboxAdapter {
+  return {
+    available: () => false,
+    spawnConfined() {
+      throw new Error("sandbox adapter is a no-op until PR-3");
+    },
+  };
+}
+
+export function createNoopSocketAdapter(): SocketAdapter {
+  return {
+    listen() {
+      return { close() {} };
+    },
+    send() {},
+  };
+}
+
+export function createNoopProcAdapter(): ProcAdapter {
+  return {
+    peerPid() {
+      return 0;
+    },
+    procInfo() {
+      return null;
+    },
+    procArgs() {
+      return null;
+    },
+  };
+}
+
 export interface LifecycleAdapter {
   tmux: TmuxFn;
   fs: LifecycleFs;
   now: () => number;
+  sandbox?: SandboxAdapter;
+  socket?: SocketAdapter;
+  proc?: ProcAdapter;
 }
 
 export function createDefaultAdapter(): LifecycleAdapter {
@@ -48,6 +116,9 @@ export function createDefaultAdapter(): LifecycleAdapter {
       statSync,
     },
     now: () => Date.now(),
+    sandbox: createNoopSandboxAdapter(),
+    socket: createNoopSocketAdapter(),
+    proc: createNoopProcAdapter(),
   };
 }
 
@@ -58,7 +129,18 @@ export function getLifecycleAdapter(): LifecycleAdapter {
 }
 
 export function setLifecycleAdapter(adapter: LifecycleAdapter | null | undefined): void {
-  currentAdapter = adapter ?? createDefaultAdapter();
+  if (!adapter) {
+    currentAdapter = createDefaultAdapter();
+    return;
+  }
+  const defaults = createDefaultAdapter();
+  currentAdapter = {
+    ...defaults,
+    ...adapter,
+    sandbox: adapter.sandbox ?? defaults.sandbox,
+    socket: adapter.socket ?? defaults.socket,
+    proc: adapter.proc ?? defaults.proc,
+  };
 }
 
 export function resetLifecycleAdapter(): void {
