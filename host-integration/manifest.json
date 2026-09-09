@@ -28,7 +28,7 @@
     },
     {
       "path": "extensions/anthropic-pool/constants.ts",
-      "sha256": "e9e051e61adae1d7c2d671364d0315a00bca9880f1673d703732a0308ae3c6b3"
+      "sha256": "0da9e02f3d314c789a34241609a0adc7ec2f04778b556d0bcf56d24ba300b074"
     },
     {
       "path": "extensions/anthropic-pool/host-transport.ts",
