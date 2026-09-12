@@ -2,6 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
   ROUTE_MATRIX,
+  ROUTED_TASK_CLASSES,
   checkerPromptPrefix,
   resolveDispatchRoute,
   type RoutingAuthor,
@@ -523,5 +524,337 @@ describe("task routing", () => {
       () => resolveDispatchRoute({ taskClass: "general-implementation", stage: "checker", author }, profileModel),
       /author must be 'implementer'/,
     );
+  });
+
+  // G9: resolver matrix
+  it("resolves G9 class×stage matrix: profile + model + family for all 8 task classes", () => {
+    // Explicit expected matrix (class × stage → profile / model / family).
+    // Ordinary classes: author / runner / checker. high-risk-planning: no runner.
+    // tiny-edit: author stay-here only; checker/runner refused.
+    assert.deepEqual([...ROUTED_TASK_CLASSES], [
+      "general-implementation",
+      "complex-alternate",
+      "large-context",
+      "mechanical-bulk",
+      "surgical",
+      "economy-fanout",
+      "high-risk-planning",
+      "tiny-edit",
+    ]);
+
+    const attempt = (taskClass: string, profile: string, model: string): RoutingAuthor => ({
+      source: "attempt",
+      attemptId: `g9-${taskClass}`,
+      sessionId: `g9-session-${taskClass}`,
+      profile,
+      model,
+    });
+
+    // general-implementation × author / checker / runner
+    const giAuthor = resolveDispatchRoute({ taskClass: "general-implementation", stage: "author" }, profileModel);
+    assert.equal(giAuthor.profile, "implementer");
+    assert.equal(giAuthor.model, "xai/grok-4.6");
+    assert.equal(giAuthor.family, "xai");
+    assert.equal(giAuthor.launch, true);
+    const giId = attempt("general-implementation", "implementer", "xai/grok-4.6");
+    const giChecker = resolveDispatchRoute({ taskClass: "general-implementation", stage: "checker", author: giId }, profileModel);
+    assert.equal(giChecker.profile, "verifier");
+    assert.equal(giChecker.model, "anthropic/claude-opus-5");
+    assert.equal(giChecker.family, "anthropic");
+    assert.equal(giChecker.launch, true);
+    const giRunner = resolveDispatchRoute({ taskClass: "general-implementation", stage: "runner", author: giId }, profileModel);
+    assert.equal(giRunner.profile, "verifier-run");
+    assert.equal(giRunner.model, "openai-codex/gpt-5.6-luna");
+    assert.equal(giRunner.family, "openai");
+    assert.equal(giRunner.launch, true);
+
+    // complex-alternate × author / checker / runner (default Luna runner is same-family openai → refuse)
+    const caAuthor = resolveDispatchRoute({ taskClass: "complex-alternate", stage: "author" }, profileModel);
+    assert.equal(caAuthor.profile, "implementer-gpt");
+    assert.equal(caAuthor.model, "openai-codex/gpt-5.6-sol");
+    assert.equal(caAuthor.family, "openai");
+    const caId = attempt("complex-alternate", "implementer-gpt", "openai-codex/gpt-5.6-sol");
+    const caChecker = resolveDispatchRoute({ taskClass: "complex-alternate", stage: "checker", author: caId }, profileModel);
+    assert.equal(caChecker.profile, "verifier");
+    assert.equal(caChecker.model, "anthropic/claude-opus-5");
+    assert.equal(caChecker.family, "anthropic");
+    assert.throws(
+      () => resolveDispatchRoute({ taskClass: "complex-alternate", stage: "runner", author: caId }, profileModel),
+      /matches author family/,
+    );
+    const caRunner = resolveDispatchRoute(
+      {
+        taskClass: "complex-alternate",
+        stage: "runner",
+        author: caId,
+        requestedModel: "openrouter/z-ai/glm-5.3-flash",
+      },
+      profileModel,
+    );
+    assert.equal(caRunner.profile, "verifier-run");
+    assert.equal(caRunner.model, "openrouter/z-ai/glm-5.3-flash");
+    assert.equal(caRunner.family, "zai");
+
+    // large-context × author / checker / runner
+    const lcAuthor = resolveDispatchRoute({ taskClass: "large-context", stage: "author" }, profileModel);
+    assert.equal(lcAuthor.profile, "implementer-k3");
+    assert.equal(lcAuthor.model, "kimi-coding/k3");
+    assert.equal(lcAuthor.family, "moonshot");
+    const lcId = attempt("large-context", "implementer-k3", "kimi-coding/k3");
+    const lcChecker = resolveDispatchRoute({ taskClass: "large-context", stage: "checker", author: lcId }, profileModel);
+    assert.equal(lcChecker.profile, "verifier");
+    assert.equal(lcChecker.model, "anthropic/claude-opus-5");
+    assert.equal(lcChecker.family, "anthropic");
+    const lcRunner = resolveDispatchRoute({ taskClass: "large-context", stage: "runner", author: lcId }, profileModel);
+    assert.equal(lcRunner.profile, "verifier-run");
+    assert.equal(lcRunner.model, "openai-codex/gpt-5.6-luna");
+    assert.equal(lcRunner.family, "openai");
+
+    // mechanical-bulk × author / checker / runner
+    const mbAuthor = resolveDispatchRoute({ taskClass: "mechanical-bulk", stage: "author" }, profileModel);
+    assert.equal(mbAuthor.profile, "bulk");
+    assert.equal(mbAuthor.model, "openrouter/z-ai/glm-5.3-flash");
+    assert.equal(mbAuthor.family, "zai");
+    const mbId = attempt("mechanical-bulk", "bulk", "openrouter/z-ai/glm-5.3-flash");
+    const mbChecker = resolveDispatchRoute({ taskClass: "mechanical-bulk", stage: "checker", author: mbId }, profileModel);
+    assert.equal(mbChecker.profile, "verifier");
+    assert.equal(mbChecker.model, "anthropic/claude-opus-5");
+    assert.equal(mbChecker.family, "anthropic");
+    const mbRunner = resolveDispatchRoute({ taskClass: "mechanical-bulk", stage: "runner", author: mbId }, profileModel);
+    assert.equal(mbRunner.profile, "verifier-run");
+    assert.equal(mbRunner.model, "openai-codex/gpt-5.6-luna");
+    assert.equal(mbRunner.family, "openai");
+
+    // surgical × author / checker / runner
+    const sgAuthor = resolveDispatchRoute({ taskClass: "surgical", stage: "author" }, profileModel);
+    assert.equal(sgAuthor.profile, "worker");
+    assert.equal(sgAuthor.model, "xai/grok-4.6");
+    assert.equal(sgAuthor.family, "xai");
+    const sgId = attempt("surgical", "worker", "xai/grok-4.6");
+    const sgChecker = resolveDispatchRoute({ taskClass: "surgical", stage: "checker", author: sgId }, profileModel);
+    assert.equal(sgChecker.profile, "verifier");
+    assert.equal(sgChecker.model, "anthropic/claude-opus-5");
+    assert.equal(sgChecker.family, "anthropic");
+    const sgRunner = resolveDispatchRoute({ taskClass: "surgical", stage: "runner", author: sgId }, profileModel);
+    assert.equal(sgRunner.profile, "verifier-run");
+    assert.equal(sgRunner.model, "openai-codex/gpt-5.6-luna");
+    assert.equal(sgRunner.family, "openai");
+
+    // economy-fanout × author / checker / runner
+    const efAuthor = resolveDispatchRoute({ taskClass: "economy-fanout", stage: "author" }, profileModel);
+    assert.equal(efAuthor.profile, "implementer-glm");
+    assert.equal(efAuthor.model, "openrouter/z-ai/glm-5.3");
+    assert.equal(efAuthor.family, "zai");
+    const efId = attempt("economy-fanout", "implementer-glm", "openrouter/z-ai/glm-5.3");
+    const efChecker = resolveDispatchRoute({ taskClass: "economy-fanout", stage: "checker", author: efId }, profileModel);
+    assert.equal(efChecker.profile, "verifier");
+    assert.equal(efChecker.model, "anthropic/claude-opus-5");
+    assert.equal(efChecker.family, "anthropic");
+    const efRunner = resolveDispatchRoute({ taskClass: "economy-fanout", stage: "runner", author: efId }, profileModel);
+    assert.equal(efRunner.profile, "verifier-run");
+    assert.equal(efRunner.model, "openai-codex/gpt-5.6-luna");
+    assert.equal(efRunner.family, "openai");
+
+    // high-risk-planning × author / checker; runner stage refused
+    const hrAuthor = resolveDispatchRoute({ taskClass: "high-risk-planning", stage: "author" }, profileModel);
+    assert.equal(hrAuthor.profile, "planner");
+    assert.equal(hrAuthor.model, "anthropic/claude-fable-5-1");
+    assert.equal(hrAuthor.family, "anthropic");
+    const hrId = attempt("high-risk-planning", "planner", "anthropic/claude-fable-5-1");
+    const hrChecker = resolveDispatchRoute({ taskClass: "high-risk-planning", stage: "checker", author: hrId }, profileModel);
+    assert.equal(hrChecker.profile, "reviewer");
+    assert.equal(hrChecker.model, "openai-codex/gpt-5.6-sol");
+    assert.equal(hrChecker.family, "openai");
+    assert.throws(
+      () => resolveDispatchRoute({ taskClass: "high-risk-planning", stage: "runner", author: hrId }, profileModel),
+      /has no runner stage/,
+    );
+
+    // tiny-edit × author stay-here; checker/runner refused (no paired stage)
+    const teAuthor = resolveDispatchRoute(
+      {
+        taskClass: "tiny-edit",
+        stage: "author",
+        currentAuthor: {
+          source: "coordinator",
+          sessionId: "g9-coordinator",
+          profile: "coordinator",
+          model: "anthropic/claude-fable-5-1",
+        },
+      },
+      profileModel,
+    );
+    assert.equal(teAuthor.profile, "coordinator");
+    assert.equal(teAuthor.model, "anthropic/claude-fable-5-1");
+    assert.equal(teAuthor.family, "anthropic");
+    assert.equal(teAuthor.launch, false);
+    assert.throws(
+      () => resolveDispatchRoute({ taskClass: "tiny-edit", stage: "checker" }, profileModel),
+      /no automatic checker/,
+    );
+    assert.throws(
+      () => resolveDispatchRoute({ taskClass: "tiny-edit", stage: "runner" }, profileModel),
+      /no automatic checker/,
+    );
+  });
+
+  // G9: override clamp
+  it("clamps same-family model overrides on paired stages and accepts cross-family overrides", () => {
+    const grokAuthor: RoutingAuthor = {
+      source: "attempt",
+      attemptId: "g9-clamp-grok",
+      sessionId: "g9-clamp-grok-session",
+      profile: "implementer",
+      model: "xai/grok-4.6",
+    };
+    const solAuthor: RoutingAuthor = {
+      source: "attempt",
+      attemptId: "g9-clamp-sol",
+      sessionId: "g9-clamp-sol-session",
+      profile: "implementer-gpt",
+      model: "openai-codex/gpt-5.6-sol",
+    };
+    const anthropicAuthor: RoutingAuthor = {
+      source: "attempt",
+      attemptId: "g9-clamp-anthropic",
+      sessionId: "g9-clamp-anthropic-session",
+      profile: "planner",
+      model: "anthropic/claude-fable-5-1",
+    };
+    const glmAuthor: RoutingAuthor = {
+      source: "attempt",
+      attemptId: "g9-clamp-glm",
+      sessionId: "g9-clamp-glm-session",
+      profile: "implementer-glm",
+      model: "openrouter/z-ai/glm-5.3",
+    };
+
+    // Grok author + Grok checker override → refuse
+    assert.throws(
+      () =>
+        resolveDispatchRoute(
+          {
+            taskClass: "general-implementation",
+            stage: "checker",
+            author: grokAuthor,
+            requestedModel: "xai/grok-4.6",
+          },
+          profileModel,
+        ),
+      /matches author family/,
+    );
+    // Grok author + Grok runner override → refuse
+    assert.throws(
+      () =>
+        resolveDispatchRoute(
+          {
+            taskClass: "general-implementation",
+            stage: "runner",
+            author: grokAuthor,
+            requestedModel: "xai/grok-4.6",
+          },
+          profileModel,
+        ),
+      /matches author family/,
+    );
+    // Sol author + any openai checker override → refuse
+    assert.throws(
+      () =>
+        resolveDispatchRoute(
+          {
+            taskClass: "complex-alternate",
+            stage: "checker",
+            author: solAuthor,
+            requestedModel: "openai-codex/gpt-5.6-luna",
+          },
+          profileModel,
+        ),
+      /matches author family/,
+    );
+    // Sol author + any openai runner override → refuse
+    assert.throws(
+      () =>
+        resolveDispatchRoute(
+          {
+            taskClass: "complex-alternate",
+            stage: "runner",
+            author: solAuthor,
+            requestedModel: "openai-codex/gpt-5.6-terra",
+          },
+          profileModel,
+        ),
+      /matches author family/,
+    );
+    // Anthropic author + Claude-on-OpenRouter checker override → refuse
+    assert.throws(
+      () =>
+        resolveDispatchRoute(
+          {
+            taskClass: "high-risk-planning",
+            stage: "checker",
+            author: anthropicAuthor,
+            requestedModel: "openrouter/anthropic/claude-opus-5",
+          },
+          profileModel,
+        ),
+      /matches author family/,
+    );
+    // GLM author + GLM Flash checker override → refuse
+    assert.throws(
+      () =>
+        resolveDispatchRoute(
+          {
+            taskClass: "economy-fanout",
+            stage: "checker",
+            author: glmAuthor,
+            requestedModel: "openrouter/z-ai/glm-5.3-flash",
+          },
+          profileModel,
+        ),
+      /matches author family/,
+    );
+    // GLM author + GLM Flash runner override → refuse
+    assert.throws(
+      () =>
+        resolveDispatchRoute(
+          {
+            taskClass: "economy-fanout",
+            stage: "runner",
+            author: glmAuthor,
+            requestedModel: "openrouter/z-ai/glm-5.3-flash",
+          },
+          profileModel,
+        ),
+      /matches author family/,
+    );
+
+    // Legitimate cross-family override is accepted (Grok author + Sol checker).
+    const grokSolChecker = resolveDispatchRoute(
+      {
+        taskClass: "general-implementation",
+        stage: "checker",
+        author: grokAuthor,
+        requestedModel: "openai-codex/gpt-5.6-sol",
+      },
+      profileModel,
+    );
+    assert.equal(grokSolChecker.profile, "verifier");
+    assert.equal(grokSolChecker.model, "openai-codex/gpt-5.6-sol");
+    assert.equal(grokSolChecker.family, "openai");
+    assert.notEqual(grokSolChecker.family, "xai");
+
+    // Legitimate cross-family runner override (Sol author + GLM Flash).
+    const solFlashRunner = resolveDispatchRoute(
+      {
+        taskClass: "complex-alternate",
+        stage: "runner",
+        author: solAuthor,
+        requestedModel: "openrouter/z-ai/glm-5.3-flash",
+      },
+      profileModel,
+    );
+    assert.equal(solFlashRunner.profile, "verifier-run");
+    assert.equal(solFlashRunner.model, "openrouter/z-ai/glm-5.3-flash");
+    assert.equal(solFlashRunner.family, "zai");
   });
 });
