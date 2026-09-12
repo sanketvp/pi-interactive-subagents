@@ -5,24 +5,28 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const EXPECTED_AGENTS = [
-  "bulk",
-  "implementer",
-  "implementer-glm",
-  "implementer-gpt",
-  "implementer-k3",
-  "planner",
-  "pr-reviewer",
-  "researcher",
-  "reviewer",
-  "scout",
-  "verifier",
-  "verifier-run",
-  "worker",
-] as const;
+/** Checked-in snapshot of global profile frontmatter `model` / `thinking`. */
+const EXPECTED_PROFILES = {
+  bulk: { model: "openrouter/z-ai/glm-5.3-flash", thinking: "low" },
+  implementer: { model: "xai/grok-4.6", thinking: "high" },
+  "implementer-glm": { model: "openrouter/z-ai/glm-5.3", thinking: "max" },
+  "implementer-gpt": { model: "openai-codex/gpt-5.6-sol", thinking: "high" },
+  "implementer-k3": { model: "kimi-coding/k3", thinking: "high" },
+  planner: { model: "anthropic/claude-fable-5-1", thinking: "high" },
+  "pr-reviewer": { model: "openai-codex/gpt-5.6-sol", thinking: "high" },
+  researcher: { model: "anthropic/claude-opus-5", thinking: "high" },
+  reviewer: { model: "openai-codex/gpt-5.6-sol", thinking: "high" },
+  scout: { model: "openai-codex/gpt-5.6-terra", thinking: "medium" },
+  verifier: { model: "anthropic/claude-opus-5", thinking: "high" },
+  "verifier-run": { model: "openai-codex/gpt-5.6-luna", thinking: "medium" },
+  worker: { model: "xai/grok-4.6", thinking: "medium" },
+} as const;
+
+const EXPECTED_AGENTS = Object.keys(EXPECTED_PROFILES);
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const README_PATH = join(ROOT, "README.md");
+const SECTION_HEADING = "### Agent Profiles (global, read live at spawn)";
 
 type AgentRow = { agent: string; model: string; thinking: string; role: string };
 
@@ -53,11 +57,10 @@ function parseFrontmatterField(content: string, key: string): string | undefined
   return field ? field[1].trim() : undefined;
 }
 
-function parseBundledAgents(readme: string): { rows: AgentRow[]; afterTable: string } {
-  const heading = "### Bundled Agents";
-  const start = readme.indexOf(heading);
-  assert.notEqual(start, -1, "README.md is missing ### Bundled Agents");
-  const afterHeading = readme.slice(start + heading.length);
+function parseAgentProfiles(readme: string): { rows: AgentRow[]; afterTable: string } {
+  const start = readme.indexOf(SECTION_HEADING);
+  assert.notEqual(start, -1, `README.md is missing ${SECTION_HEADING}`);
+  const afterHeading = readme.slice(start + SECTION_HEADING.length);
   const nextHeading = afterHeading.search(/\n### /);
   const section = nextHeading === -1 ? afterHeading : afterHeading.slice(0, nextHeading);
 
@@ -77,11 +80,11 @@ function parseBundledAgents(readme: string): { rows: AgentRow[]; afterTable: str
       break;
     }
   }
-  assert.ok(tableLines.length >= 3, "Bundled Agents table is missing rows");
+  assert.ok(tableLines.length >= 3, "Agent Profiles table is missing rows");
 
   const header = splitRow(tableLines[0]).map(stripCell);
   assert.deepEqual(header, ["Agent", "Model", "Thinking", "Role"]);
-  assert.ok(isSeparator(tableLines[1]), "Bundled Agents table is missing a separator row");
+  assert.ok(isSeparator(tableLines[1]), "Agent Profiles table is missing a separator row");
 
   const rows: AgentRow[] = tableLines.slice(2).map((line) => {
     const cells = splitRow(line).map(stripCell);
@@ -92,13 +95,13 @@ function parseBundledAgents(readme: string): { rows: AgentRow[]; afterTable: str
   return { rows, afterTable: lines.slice(afterIndex).join("\n") };
 }
 
-describe("README Bundled Agents table", () => {
+describe("README agent profiles table", () => {
   const readme = readFileSync(README_PATH, "utf8");
-  const { rows, afterTable } = parseBundledAgents(readme);
+  const { rows, afterTable } = parseAgentProfiles(readme);
 
   it("lists exactly the 13 global agent profiles", () => {
     assert.equal(rows.length, 13);
-    assert.deepEqual(rows.map((row) => row.agent), [...EXPECTED_AGENTS]);
+    assert.deepEqual(rows.map((row) => row.agent), EXPECTED_AGENTS);
   });
 
   it("has non-empty Model and Thinking cells", () => {
@@ -109,9 +112,19 @@ describe("README Bundled Agents table", () => {
     }
   });
 
-  it("notes that profiles live under ~/.pi/agent/agents", () => {
+  it("matches the checked-in model and thinking mapping", () => {
+    assert.equal(rows.length, EXPECTED_AGENTS.length);
+    for (const row of rows) {
+      const expected = EXPECTED_PROFILES[row.agent as keyof typeof EXPECTED_PROFILES];
+      assert.ok(expected, `README has unexpected agent ${row.agent}`);
+      assert.equal(row.model, expected.model, `${row.agent} Model does not match checked-in mapping`);
+      assert.equal(row.thinking, expected.thinking, `${row.agent} Thinking does not match checked-in mapping`);
+    }
+  });
+
+  it("notes that profiles are read live at spawn", () => {
     const note = afterTable.split("Agent discovery follows priority")[0];
-    assert.match(note, /~\/\.pi\/agent\/agents/);
+    assert.match(note, /read live at spawn/);
   });
 
   it("matches live global agent frontmatter when present", (t) => {

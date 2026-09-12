@@ -77,7 +77,7 @@ Subagent panes are created without stealing keyboard focus (cmux, tmux). Launch 
 | `/iterate`                 | Fork into a subagent for quick fixes |
 | `/subagent <agent> <task>` | Spawn a named agent directly         |
 
-### Bundled Agents
+### Agent Profiles (global, read live at spawn)
 
 | Agent               | Model                            | Thinking | Role                                                                              |
 | ------------------- | -------------------------------- | -------- | --------------------------------------------------------------------------------- |
@@ -95,7 +95,7 @@ Subagent panes are created without stealing keyboard focus (cmux, tmux). Launch 
 | **verifier-run**    | openai-codex/gpt-5.6-luna        | medium   | Command runner for verification — evidence only, never a verdict                  |
 | **worker**          | xai/grok-4.6                     | medium   | Surgical slice ONLY (≤1 existing file, no new features)                           |
 
-Agent profiles are read live from their definition files at spawn time, so this table reflects the current global profiles. They live in `~/.pi/agent/agents/<name>.md` (global) and `.pi/agents/<name>.md` (project-local).
+Agent profiles are read live at spawn from their definition files. This markdown table is a snapshot and does not auto-update. Precedence: project `.pi/agents/` > global `~/.pi/agent/agents/` > package `agents/`.
 
 Agent discovery follows priority: **project-local** (`.pi/agents/`) > **global** (`~/.pi/agent/agents/`) > **package-bundled**. Override any bundled agent by placing your own version in the higher-priority location.
 
