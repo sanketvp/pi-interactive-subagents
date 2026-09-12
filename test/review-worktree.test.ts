@@ -398,4 +398,29 @@ describe("safeOpenForWrite", () => {
     assert.equal(ex.mode & 0o777, 0o755 & ~mask);
     assert.equal(readFileSync(join(wt, "sub/exec.sh"), "utf8"), "#!/bin/sh\n");
   });
+
+  it("rejects a symlinked root and does not write outside", () => {
+    const root = mkdtempSync(join(tmpdir(), "pi-sow-root-"));
+    const outside = join(root, "outside");
+    mkdirSync(outside);
+    const planted = join(outside, "planted.txt");
+    const linkRoot = join(root, "link-root");
+    symlinkSync(outside, linkRoot);
+    assert.throws(
+      () => safeOpenForWrite(linkRoot, "planted.txt", Buffer.from("pwned\n"), 0o644),
+      UnsupportedTree,
+    );
+    assert.equal(existsSync(planted), false);
+  });
+
+  it("writes a POSIX filename containing a literal backslash", () => {
+    const root = mkdtempSync(join(tmpdir(), "pi-sow-bs-"));
+    const wt = join(root, "wt");
+    mkdirSync(wt);
+    const name = "a\\b";
+    const bytes = Buffer.from("backslash-name\n");
+    safeOpenForWrite(wt, name, bytes, 0o644);
+    assert.equal(readFileSync(join(wt, name), "utf8"), "backslash-name\n");
+    assert.equal(existsSync(join(wt, "a")), false);
+  });
 });
