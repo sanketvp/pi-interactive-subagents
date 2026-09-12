@@ -4,6 +4,7 @@ import { Type, type Static } from "@sinclair/typebox";
 import { Box, Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { dirname, join } from "node:path";
 import { validateLaunch, shouldCloseAfterWatchError } from "./hardening.ts";
+import { artifactIdentityLedgerDir, prepareArtifactWrite } from "./artifact-identity.ts";
 import { randomUUID } from "node:crypto";
 import {
   type AttemptRecord,
@@ -1408,8 +1409,11 @@ async function launchSubagentImpl(
       .replace(/\s+/g, "-")
       .replace(/-+/g, "-")
       .replace(/^-|-$/g, "");
-    const syspromptPath = join(artifactDir, `context/${spSafeName || "subagent"}-sysprompt-${spTimestamp}.md`);
-    mkdirSync(dirname(syspromptPath), { recursive: true, mode: 0o700 });
+    const syspromptPath = prepareArtifactWrite({
+      path: join(artifactDir, `context/${spSafeName || "subagent"}-sysprompt-${spTimestamp}.md`),
+      attemptId,
+      ledgerDir: artifactIdentityLedgerDir(artifactDir),
+    });
     writeFileSync(syspromptPath, identity, "utf8");
     systemPromptPath = syspromptPath;
   }
@@ -1426,8 +1430,11 @@ async function launchSubagentImpl(
       .replace(/\s+/g, "-")
       .replace(/-+/g, "-")
       .replace(/^-|-$/g, "");
-    const artifactPath = join(artifactDir, `context/${safeName || "subagent"}-${taskTimestamp}.md`);
-    mkdirSync(dirname(artifactPath), { recursive: true, mode: 0o700 });
+    const artifactPath = prepareArtifactWrite({
+      path: join(artifactDir, `context/${safeName || "subagent"}-${taskTimestamp}.md`),
+      attemptId,
+      ledgerDir: artifactIdentityLedgerDir(artifactDir),
+    });
     writeFileSync(artifactPath, fullTask, "utf8");
     taskArg = `@${artifactPath}`;
   }
