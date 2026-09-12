@@ -306,7 +306,7 @@ describe("task routing", () => {
     assert.match(checkerRoute.params.task, /xai\/grok-4\.6/);
   });
 
-  it("registers D23 tool help: unique artifact path per worker; interrupt is not kill (no API field implied)", () => {
+  it("D23 convention retained; #15 optional artifactPath reservation", () => {
     const tools: Record<string, any> = {};
     const api: any = {
       on() {},
@@ -331,9 +331,13 @@ describe("task routing", () => {
       assert.match(text, /<name>\.<profile>\.<attemptId>\.md/);
       assert.match(text, /never share a path between workers/);
     }
-    // Convention lives in the task text: no artifactPath-style parameter exists on the tool.
-    const paramNames = Object.keys(spawn.parameters?.properties ?? {});
-    assert.ok(!paramNames.some((n) => /artifact|outputPath/i.test(n)), `unexpected artifact param in ${paramNames.join(",")}`);
+    const ap = spawn.parameters.properties.artifactPath;
+    assert.ok(ap, "artifactPath is an optional param");
+    assert.ok(!spawn.parameters.required?.includes("artifactPath"));
+    assert.match(ap.description, /Omit to use the text convention/);
+    for (const text of [spawn.description, spawn.promptSnippet]) {
+      assert.match(text, /text convention alone still works|convention.*still works/);
+    }
 
     const interrupt = tools["subagent_interrupt"];
     assert.ok(interrupt, "subagent_interrupt tool registered");

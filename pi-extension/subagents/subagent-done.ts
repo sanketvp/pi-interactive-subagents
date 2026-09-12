@@ -10,6 +10,7 @@ import { writeCompletion, writeStartupReceipt } from "./completion.mjs";
 import { writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { dirname } from "node:path";
 import { createSubagentActivityRecorder } from "./activity.ts";
+import { guardReservedArtifactWrite } from "./artifact-claim.ts";
 
 export function shouldMarkUserTookOver(agentStarted: boolean): boolean {
   return agentStarted;
@@ -285,6 +286,15 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("tool_call", (event) => {
     recorder.toolCall((event as any).toolCallId, (event as any).toolName);
+  });
+
+  pi.on("tool_call", (event, ctx) => {
+    return guardReservedArtifactWrite(event as any, {
+      selfAttemptId: process.env.PI_SUBAGENT_ID ?? "",
+      ownPath: process.env.PI_SUBAGENT_ARTIFACT_PATH ?? null,
+      reservationsDir: process.env.PI_SUBAGENT_RESERVATIONS_DIR ?? null,
+      baseDir: (ctx as any)?.cwd ?? process.cwd(),
+    });
   });
 
   pi.on("tool_execution_update", (event) => {
