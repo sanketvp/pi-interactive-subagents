@@ -23,6 +23,7 @@ import {
   remove,
   resolveVerifyBase,
   sessionShortOf,
+  safeOpenForWrite,
 } from "../pi-extension/subagents/review/worktree.ts";
 
 function initRepo(dir: string) {
@@ -323,5 +324,78 @@ describe("worktree materialisation", () => {
       return;
     }
     // Case-sensitive FS: both names can exist; that is not a failure.
+  });
+});
+
+describe("safeOpenForWrite", () => {
+  it("rejects a final-component symlink pointing outside the root", () => {
+    const root = mkdtempSync(join(tmpdir(), "pi-sow-esc-"));
+    const wt = join(root, "wt");
+    mkdirSync(wt);
+    const outside = join(root, "outside.txt");
+    writeFileSync(outside, "sentinel\n");
+    symlinkSync(outside, join(wt, "escape"));
+    assert.throws(
+      () => safeOpenForWrite(wt, "escape", Buffer.from("pwned\n"), 0o644),
+      UnsupportedTree,
+    );
+    assert.equal(readFileSync(outside, "utf8"), "sentinel\n");
+    assert.equal(lstatSync(join(wt, "escape")).isSymbolicLink(), true);
+    assert.equal(existsSync(join(root, "pwned")), false);
+  });
+
+  it("rejects a symlinked intermediate directory pointing outside the root", () => {
+    const root = mkdtempSync(join(tmpdir(), "pi-sow-mid-"));
+    const wt = join(root, "wt");
+    mkdirSync(wt);
+    const outsideDir = join(root, "outside");
+    mkdirSync(outsideDir);
+    const planted = join(outsideDir, "planted.txt");
+    symlinkSync(outsideDir, join(wt, "link"));
+    assert.throws(
+      () => safeOpenForWrite(wt, "link/planted.txt", Buffer.from("pwned\n"), 0o644),
+      UnsupportedTree,
+    );
+    assert.equal(existsSync(planted), false);
+    assert.equal(lstatSync(join(wt, "link")).isSymbolicLink(), true);
+  });
+
+  it("rejects .. traversal in the relative path", () => {
+    const root = mkdtempSync(join(tmpdir(), "pi-sow-dot-"));
+    const wt = join(root, "wt");
+    mkdirSync(wt);
+    mkdirSync(join(wt, "sub"));
+    const outside = join(root, "pwned.txt");
+    assert.throws(
+      () => safeOpenForWrite(wt, "../pwned.txt", Buffer.from("pwned\n"), 0o644),
+      UnsupportedTree,
+    );
+    assert.equal(existsSync(outside), false);
+    assert.throws(
+      () => safeOpenForWrite(wt, "sub/../../pwned.txt", Buffer.from("pwned\n"), 0o644),
+      UnsupportedTree,
+    );
+    assert.equal(existsSync(outside), false);
+  });
+
+  it("writes bytes and mode for a normal path inside the worktree", () => {
+    const root = mkdtempSync(join(tmpdir(), "pi-sow-ok-"));
+    const wt = join(root, "wt");
+    mkdirSync(wt);
+    const bytes = Buffer.from("hello-safe\n");
+    safeOpenForWrite(wt, "ok.txt", bytes, 0o644);
+    assert.equal(readFileSync(join(wt, "ok.txt"), "utf8"), "hello-safe\n");
+    const st = lstatSync(join(wt, "ok.txt"));
+    assert.equal(st.isFile(), true);
+    assert.equal(st.isSymbolicLink(), false);
+    const mask = process.umask();
+    assert.equal(st.mode & 0o777, 0o644 & ~mask);
+
+    mkdirSync(join(wt, "sub"), { mode: 0o700 });
+    safeOpenForWrite(wt, "sub/exec.sh", Buffer.from("#!/bin/sh\n"), 0o755);
+    const ex = lstatSync(join(wt, "sub/exec.sh"));
+    assert.equal(ex.isFile(), true);
+    assert.equal(ex.mode & 0o777, 0o755 & ~mask);
+    assert.equal(readFileSync(join(wt, "sub/exec.sh"), "utf8"), "#!/bin/sh\n");
   });
 });

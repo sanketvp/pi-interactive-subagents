@@ -189,22 +189,61 @@ function assertNoSymlinkComponent(root: string, rel: string): void {
   }
 }
 
-/** TODO(PR-3): replace with protected.safeOpenForWrite (openat walk, O_NOFOLLOW). This is an interim guard. */
-function writeFileNoFollow(abs: string, bytes: Buffer, mode: number): void {
-  let st;
-  try {
-    st = lstatSync(abs);
-  } catch {
-    st = null;
-  }
-  if (st?.isSymbolicLink()) throw new UnsupportedTree(`symlink in path: ${abs}`);
-  const flags = constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL;
+/**
+ * Node's fs.openSync has no dirfd (no openat(2)), so this cannot pin a
+ * directory fd across components. Equivalent guarantee: lstat +
+ * O_RDONLY|O_DIRECTORY|O_NOFOLLOW on each intermediate, then
+ * O_WRONLY|O_CREAT|O_EXCL|O_NOFOLLOW on the leaf, plus a realpath
+ * containment check under `root`.
+ */
+export function safeOpenForWrite(root: string, relPath: string, bytes: Buffer, mode: number): void {
+  assertSafeRelPath(relPath);
+  const parts = relPath.split(/[/\\]/).filter((p) => p && p !== ".");
+  if (parts.length === 0) throw new UnsupportedTree(`unsafe path in tree: ${JSON.stringify(relPath)}`);
+
   const nofollow = typeof constants.O_NOFOLLOW === "number" ? constants.O_NOFOLLOW : 0;
+  const rootReal = realpathSync(root);
+  let cur = rootReal;
+  for (let i = 0; i < parts.length - 1; i++) {
+    cur = join(cur, parts[i]);
+    const st = lstatSync(cur);
+    if (st.isSymbolicLink()) throw new UnsupportedTree(`symlink in path: ${relPath}`);
+    if (!st.isDirectory()) throw new UnsupportedTree(`directory/file conflict at ${relPath}`);
+    const dirFlags = constants.O_RDONLY | constants.O_DIRECTORY | nofollow;
+    let dfd: number | undefined;
+    try {
+      dfd = openSync(cur, dirFlags);
+    } catch (error: any) {
+      if (error?.code === "ELOOP") throw new UnsupportedTree(`symlink in path: ${relPath}`);
+      throw error;
+    } finally {
+      if (dfd !== undefined) closeSync(dfd);
+    }
+  }
+
+  const parentReal = realpathSync(cur);
+  if (parentReal !== rootReal && !parentReal.startsWith(rootReal + sep)) {
+    throw new UnsupportedTree(`path escapes tree: ${relPath}`);
+  }
+  const abs = join(parentReal, parts[parts.length - 1]);
+  if (abs !== rootReal && !abs.startsWith(rootReal + sep)) {
+    throw new UnsupportedTree(`path escapes tree: ${relPath}`);
+  }
+
+  let leafSt;
+  try {
+    leafSt = lstatSync(abs);
+  } catch {
+    leafSt = null;
+  }
+  if (leafSt?.isSymbolicLink()) throw new UnsupportedTree(`symlink in path: ${abs}`);
+  const flags = constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | nofollow;
   let fd: number;
   try {
-    fd = openSync(abs, flags | nofollow, mode);
+    fd = openSync(abs, flags, mode);
   } catch (error: any) {
     if (error?.code === "EEXIST") throw new UnsupportedTree(`case-collision or existing path: ${abs}`);
+    if (error?.code === "ELOOP") throw new UnsupportedTree(`symlink in path: ${abs}`);
     throw error;
   }
   try {
@@ -368,7 +407,7 @@ export function materialize(
       });
     } else {
       const mode = item.mode === "100755" ? 0o755 : 0o644;
-      writeFileNoFollow(abs, bytes, mode);
+      safeOpenForWrite(dir, item.path, bytes, mode);
       if (item.mode === "100755") chmodSync(abs, 0o755);
       entries.push({
         path: item.path,
