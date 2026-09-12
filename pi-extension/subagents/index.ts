@@ -99,6 +99,12 @@ import {
   type ActivityReadResult,
   type SubagentActivityState,
 } from "./activity.ts";
+import {
+  checkerPromptPrefix,
+  resolveDispatchRoute,
+  type RoutingAuthor,
+  type RoutingResolution,
+} from "./routing.ts";
 
 /** Absolute path to `pi-extension/subagents`. https://github.com/nodejs/node/issues/37845 */
 const SUBAGENTS_DIR = dirname(fileURLToPath(import.meta.url));
@@ -171,6 +177,18 @@ const SubagentParams = Type.Object({
     Type.String({
       description:
         "Resume a previous Claude Code session by its ID. Loads the conversation history and continues where it left off. The session ID is returned in details of every claude tool call. Use this to retry cancelled runs or ask follow-up questions.",
+    }),
+  ),
+  routing: Type.Optional(
+    Type.Object({
+      taskClass: Type.String({
+        description:
+          "Deterministic route: general-implementation, complex-alternate, large-context, mechanical-bulk, surgical, economy-fanout, high-risk-planning, or tiny-edit.",
+      }),
+      stage: Type.String({ description: "Route stage: author, checker, or runner." }),
+      authorAttemptId: Type.Optional(
+        Type.String({ description: "Completed author attempt ID. Required for non-tiny checker and runner dispatches." }),
+      ),
     }),
   ),
 });
@@ -1074,6 +1092,79 @@ function requireTuiParent(ctx: { mode?: string }): void {
   }
 }
 
+function currentCoordinatorAuthor(ctx: {
+  model?: { provider?: string; id?: string };
+  sessionManager: { getSessionId(): string };
+}): RoutingAuthor {
+  const provider = ctx.model?.provider;
+  const model = ctx.model?.id;
+  const sessionId = ctx.sessionManager.getSessionId();
+  if (!provider || !model || !sessionId) {
+    throw new Error("Routing refused: current coordinator model/session identity is unavailable");
+  }
+  return { source: "coordinator", sessionId, profile: "coordinator", model: `${provider}/${model}` };
+}
+
+function completedAuthor(
+  attemptId: string | undefined,
+  registry: WorkerRegistry,
+): RoutingAuthor {
+  if (!attemptId) throw new Error("Routing refused: checker requires authorAttemptId");
+  const attempt = registry.workers.find((worker) => worker.attemptId === attemptId);
+  if (!attempt) throw new Error(`Routing refused: author attempt '${attemptId}' was not found`);
+  if (attempt.outcome !== "done" || !attempt.observed || !attempt.piSessionId || !attempt.agent) {
+    throw new Error(`Routing refused: author attempt '${attemptId}' has no completed observed identity`);
+  }
+  return {
+    source: "attempt",
+    attemptId,
+    sessionId: attempt.piSessionId,
+    profile: attempt.agent,
+    model: `${attempt.observed.provider}/${attempt.observed.model}`,
+  };
+}
+
+function profileModel(profile: string): string | undefined {
+  return loadAgentDefaults(profile)?.model;
+}
+
+function resolveSubagentRouting(
+  params: Static<typeof SubagentParams>,
+  ctx: {
+    model?: { provider?: string; id?: string };
+    sessionManager: { getSessionId(): string };
+  },
+  registry: WorkerRegistry,
+): { params: Static<typeof SubagentParams>; resolution?: RoutingResolution } {
+  if (!params.routing) return { params };
+  const { taskClass, stage, authorAttemptId } = params.routing;
+  const currentAuthor = currentCoordinatorAuthor(ctx);
+  // tiny-edit has no automatic checker (see routing.ts); let resolveDispatchRoute
+  // reject it there with a clear message instead of failing on a missing attemptId here.
+  const author =
+    (stage === "checker" || stage === "runner") && taskClass !== "tiny-edit" ? completedAuthor(authorAttemptId, registry) : undefined;
+  const resolution = resolveDispatchRoute(
+    {
+      taskClass,
+      stage,
+      requestedAgent: params.agent,
+      requestedModel: params.model,
+      author,
+      currentAuthor,
+    },
+    profileModel,
+  );
+  if (!resolution.launch) return { params, resolution };
+  const task =
+    resolution.stage === "checker"
+      ? `${checkerPromptPrefix(resolution)}\n\n${params.task}`
+      : params.task;
+  return {
+    params: { ...params, agent: resolution.profile, model: resolution.model, task },
+    resolution,
+  };
+}
+
 function requestedIdentity(
   params: { model?: string },
   agentDefs: AgentDefaults | null,
@@ -1206,6 +1297,7 @@ export const __test__ = {
   handleSubagentInterrupt,
   resolveResultPresentation,
   resolveResumeLaunchBehavior,
+  resolveSubagentRouting,
   runningSubagents,
   formatElapsed,
   setLifecycleAdapter,
@@ -1812,20 +1904,38 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         "DO NOT write polling loops, sleep/wait commands, tail/watch scripts, or repeatedly read session/log files to detect completion. DO NOT call subagents_list or any other tool to 'check' status. All of that is wasted work — the harness handles delivery for you. " +
         "DO NOT fabricate, assume, or summarize results after calling this tool. " +
         "After spawning, either end your turn immediately, or work on other independent tasks (including spawning more subagents in parallel). The harness will wake you with the result when it is ready. " +
-        "Delivery of the result message is AT-MOST-ONCE, never guaranteed exactly-once: in rare cases (parent reload/crash mid-delivery) a finished sub-agent's result may not arrive automatically. If a sub-agent you spawned seems to have gone silent, check /subagents-diagnose rather than assuming it is still running.",
+        "Delivery of the result message is AT-MOST-ONCE, never guaranteed exactly-once: in rare cases (parent reload/crash mid-delivery) a finished sub-agent's result may not arrive automatically. If a sub-agent you spawned seems to have gone silent, check /subagents-diagnose rather than assuming it is still running. " +
+        "If a worker must write a file, assign each worker a unique artifact path in its task text (e.g. <name>.<profile>.<attemptId>.md); never share a path between workers — concurrent writers silently overwrite each other. This is a convention you state in the task, not a parameter of this tool.",
       promptSnippet:
         "Spawn a sub-agent in a dedicated terminal multiplexer pane. " +
         "This is a fire-and-forget async tool: the call returns immediately with only an acknowledgement. " +
         "When the sub-agent finishes, the harness AUTOMATICALLY delivers its result as a steer message that wakes you up and starts a new turn — you do not need to do anything to receive it. " +
         "DO NOT write polling loops, sleep/wait commands, tail/watch scripts, or repeatedly read session/log files to detect completion. DO NOT call subagents_list or any other tool to 'check' status. All of that is wasted work — the harness handles delivery for you. " +
         "DO NOT fabricate, assume, or summarize results after calling this tool. " +
-        "After spawning, either end your turn immediately, or work on other independent tasks (including spawning more subagents in parallel). The harness will wake you with the result when it is ready. Delivery is at-most-once (see /subagents-diagnose if a result seems missing).",
+        "After spawning, either end your turn immediately, or work on other independent tasks (including spawning more subagents in parallel). The harness will wake you with the result when it is ready. Delivery is at-most-once (see /subagents-diagnose if a result seems missing). " +
+        "Assign each worker a unique artifact path in its task text (e.g. <name>.<profile>.<attemptId>.md); never share a path between workers.",
       parameters: SubagentParams,
 
       async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+        const routed = resolveSubagentRouting(params, ctx, workerRegistry);
+        if (routed.resolution && !routed.resolution.launch) {
+          return {
+            content: [
+              {
+                type: "text",
+                text:
+                  `Route ${routed.resolution.taskClass}: stay in this coordinator session ` +
+                  `(${routed.resolution.model}, ${routed.resolution.family}). Do not spawn a worker.`,
+              },
+            ],
+            details: { status: "stay_here", routing: routed.resolution },
+          };
+        }
+        const launchParams = routed.params;
+
         // Prevent self-spawning (e.g. planner spawning another planner)
         const currentAgent = process.env.PI_SUBAGENT_AGENT;
-        if (params.agent && currentAgent && params.agent === currentAgent) {
+        if (launchParams.agent && currentAgent && launchParams.agent === currentAgent) {
           return {
             content: [
               {
@@ -1856,7 +1966,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
 
         requireTuiParent(ctx);
         // Launch the subagent (creates pane, sends command)
-        const running = await launchSubagent(params, ctx);
+        const running = await launchSubagent(launchParams, ctx);
 
         // Start widget refresh and status supervision when the first agent launches
         startWidgetRefresh();
@@ -1877,12 +1987,13 @@ export default function subagentsExtension(pi: ExtensionAPI) {
           ],
           details: {
             id: running.id,
-            name: params.name,
-            task: params.task,
-            agent: params.agent,
+            name: launchParams.name,
+            task: launchParams.task,
+            agent: launchParams.agent,
             sessionFile: running.sessionFile,
             launchScriptFile: running.launchScriptFile,
             status: "started",
+            routing: routed.resolution,
           },
         };
       },
@@ -1951,11 +2062,13 @@ export default function subagentsExtension(pi: ExtensionAPI) {
       description:
         "Send Escape to the active turn of a currently running Pi-backed subagent. " +
         "The child pane, session, watcher, and running entry remain alive; this returns only a local acknowledgement " +
-        "and does not emit a subagent_result solely because of this request.",
+        "and does not emit a subagent_result solely because of this request. " +
+        "Interrupt is not kill: the worker may still run and write. Confirm termination via /subagents-diagnose before reusing any artifact path.",
       promptSnippet:
         "Send Escape to the active turn of a currently running Pi-backed subagent. " +
         "The child pane, session, watcher, and running entry remain alive; this returns only a local acknowledgement " +
-        "and does not emit a subagent_result solely because of this request.",
+        "and does not emit a subagent_result solely because of this request. " +
+        "Interrupt is not kill: the worker may still run and write. Confirm termination via /subagents-diagnose before reusing any artifact path.",
       parameters: Type.Object({
         id: Type.Optional(Type.String({ description: "Exact running subagent id" })),
         name: Type.Optional(Type.String({ description: "Exact running subagent display name" })),

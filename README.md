@@ -177,6 +177,31 @@ subagent({ name: "Designer", agent: "game-designer", cwd: "agents/game-designer"
 | `skills`               | string  | —              | Comma-separated skill names                                                                       |
 | `tools`                | string  | —              | Comma-separated tool names                                                                        |
 | `cwd`                  | string  | —              | Working directory for the sub-agent (see [Role Folders](#role-folders))                           |
+| `routing`              | object  | —              | Optional deterministic `{ taskClass, stage, authorAttemptId? }` routing preflight                  |
+
+### Deterministic task routing
+
+When `routing` is present, the extension selects the configured profile and its current model ID before launch. Use `stage: "author"` first, then make a separate `stage: "checker"` call with the completed `authorAttemptId`. The checker preflight reads the author's observed model from `workers.json`, rejects unknown or same-family pairings (including model overrides), and prefixes the checker task with the source attempt/session identity. It does not automatically schedule the checker or interpret its verdict.
+
+```typescript
+subagent({
+  name: "Build",
+  task: "Implement the reviewed change",
+  routing: { taskClass: "general-implementation", stage: "author" },
+});
+
+subagent({
+  name: "Check",
+  task: "Inspect the actual diff and run the tests",
+  routing: {
+    taskClass: "general-implementation",
+    stage: "checker",
+    authorAttemptId: "<completed attempt UUID>",
+  },
+});
+```
+
+Routes: `general-implementation`, `complex-alternate`, `large-context`, `mechanical-bulk`, `surgical`, `high-risk-planning`, and `tiny-edit`. `tiny-edit` author routing returns `stay_here` with the current coordinator model/family instead of spawning. `tiny-edit` has no automatic `checker` route: a stay-here edit never records an author identity, so there is nothing to check against, and `stage: "checker"` is refused before launch with a clear error. If a tiny-edit needs an independent checker, delegate it as `general-implementation` or `surgical` instead so the author attempt is recorded. The coordinator owns the bounded correction/recheck workflow.
 
 ---
 
