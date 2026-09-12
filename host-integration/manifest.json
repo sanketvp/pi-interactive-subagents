@@ -8,7 +8,7 @@
     },
     {
       "path": "extensions/pi-dispatch-mandate-guard.ts",
-      "sha256": "18f23e825bd13fcf560fda090595ddbb6478791fb6137d7a8b47afb2a4cbde37"
+      "sha256": "7c7d735cbd0ae969c706b561e4f8f524ab19afd8f0c7fb0d33ea4e94f0e3f2eb"
     },
     {
       "path": "extensions/pi-orca-route.ts",
@@ -20,7 +20,7 @@
     },
     {
       "path": "extensions/pi-orchestration/policy.ts",
-      "sha256": "fd16f448a62a3b9b11b486283439bc362eebfe823122416542d0f9338d80e8e9"
+      "sha256": "d09057c6c837027c4df92c29a08843dbb8c3e7425027af16c12064c4b528d28d"
     },
     {
       "path": "extensions/anthropic-pool/auth-flow.ts",
@@ -28,7 +28,7 @@
     },
     {
       "path": "extensions/anthropic-pool/constants.ts",
-      "sha256": "f2c976e61e39ca6681997a53cb1c0fe91cc0808a5054a1ea5e19adfb3e216ae1"
+      "sha256": "2883224ea1b0063c4eb82ad3c45312d59b32889649b8fb4663551fbfd40212b3"
     },
     {
       "path": "extensions/anthropic-pool/host-transport.ts",

@@ -1,6 +1,6 @@
 import { hostname } from 'node:os';
 
-export const CONTRACT_REVISION = '2026-09-07e';
+export const CONTRACT_REVISION = '2026-09-12a';
 
 // Accepted 2026-09-07 (live trial, sid 01a07d3f-2a3a-711e-9cd2-0b22c4b2d4ed and
 // 01a07d44-2364-7214-a244-b78cd3d4ad8b): the pi-interactive-subagents `subagent`
@@ -8,8 +8,7 @@ export const CONTRACT_REVISION = '2026-09-07e';
 // active pane. It requires this Pi to be running under the private tmux host
 // that the `pi` wrapper in ~/.zshrc starts for Orca terminals.
 export const LAUNCH_READY =
-  'Worker launch READY: use the `subagent` tool (agent profiles: scout, worker, implementer, ' +
-  'reviewer, verifier, planner). Workers tile as tmux panes in this tab; results are steered back ' +
+  'Worker launch READY: use the `subagent` tool (agent profiles: bulk, implementer, implementer-gpt, implementer-k3, implementer-glm, planner, pr-reviewer, researcher, reviewer, scout, verifier, verifier-run, worker). Workers tile as tmux panes in this tab; results are steered back ' +
   'automatically. Never use standalone agent CLIs, new Orca tabs, or hidden print-mode workers.';
 
 export const LAUNCH_BLOCKER =

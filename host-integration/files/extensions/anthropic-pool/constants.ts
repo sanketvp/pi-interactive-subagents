@@ -15,7 +15,7 @@ export const SCOPES =
 // kept current by ~/.claude/scripts/agent-cli-daily-update.sh.
 import { execFileSync } from "node:child_process";
 
-const CLAUDE_CODE_VERSION_FLOOR = "2.1.268";
+const CLAUDE_CODE_VERSION_FLOOR = "2.1.269";
 
 function detectClaudeCodeVersion(): string {
   const override = process.env.PI_CLAUDE_CODE_VERSION;

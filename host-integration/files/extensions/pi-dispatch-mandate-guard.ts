@@ -34,15 +34,7 @@ const CLAUDE_DISPATCH_RE = /(^|[;&|\s])claude\s+(-p\b|--print\b)/
 const ORCA_CREATE_WITH_CLI_RE = /orca\s+terminal\s+create\b[^;&|]*--command\s+["']?[^"'\n]*\b(claude|codex)\b/
 
 const REASON =
-  'Dispatch subagents via `~/.claude/scripts/pi-dispatch.sh <preset> "<prompt>"` ' +
-  '(presets: fable opus sonnet haiku sol terra luna astra grok grok-build glm k3), not the ' +
-  'standalone `claude`/`codex` CLI binaries directly -- per the 2026-09-04 unified-dispatch ' +
-  'directive. If you need multiple subagents visible together, use `orca terminal split` off ' +
-  'your own terminal handle to tile them into THIS tab, not `orca terminal create` for ' +
-  'separate tabs -- per the 2026-09-06 tiling pattern. Evidence this is enforced now, not just ' +
-  'documented: a fresh session told to "use multi-agent swarm" spawned 4 subagents as literal ' +
-  'claude/codex CLI processes in separate tabs, ignoring both prose rules. ' +
-  'Bypass with the literal text --allow-standalone-cli in the command if this is a deliberate exception.'
+  'Launch workers with the `subagent` tool (profiles in ~/.pi/agent/agents/). Do not call `claude`/`codex` CLIs, `pi-dispatch.sh`, or `orca terminal create/split` directly for workers. Bypass with --allow-standalone-cli only for a deliberate, disclosed exception.'
 
 export default function (pi) {
   pi.on('tool_call', (event, _ctx) => {
