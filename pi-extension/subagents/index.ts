@@ -1108,8 +1108,9 @@ function currentCoordinatorAuthor(ctx: {
 function completedAuthor(
   attemptId: string | undefined,
   registry: WorkerRegistry,
+  stage: "checker" | "runner",
 ): RoutingAuthor {
-  if (!attemptId) throw new Error("Routing refused: checker requires authorAttemptId");
+  if (!attemptId) throw new Error(`Routing refused: ${stage} requires authorAttemptId`);
   const attempt = registry.workers.find((worker) => worker.attemptId === attemptId);
   if (!attempt) throw new Error(`Routing refused: author attempt '${attemptId}' was not found`);
   if (attempt.outcome !== "done" || !attempt.observed || !attempt.piSessionId || !attempt.agent) {
@@ -1139,10 +1140,13 @@ function resolveSubagentRouting(
   if (!params.routing) return { params };
   const { taskClass, stage, authorAttemptId } = params.routing;
   const currentAuthor = currentCoordinatorAuthor(ctx);
-  // tiny-edit has no automatic checker (see routing.ts); let resolveDispatchRoute
-  // reject it there with a clear message instead of failing on a missing attemptId here.
+  // tiny-edit has no automatic checker or runner (see routing.ts); let
+  // resolveDispatchRoute reject those stages there with a clear message
+  // instead of failing on a missing attemptId here.
   const author =
-    (stage === "checker" || stage === "runner") && taskClass !== "tiny-edit" ? completedAuthor(authorAttemptId, registry) : undefined;
+    (stage === "checker" || stage === "runner") && taskClass !== "tiny-edit"
+      ? completedAuthor(authorAttemptId, registry, stage)
+      : undefined;
   const resolution = resolveDispatchRoute(
     {
       taskClass,

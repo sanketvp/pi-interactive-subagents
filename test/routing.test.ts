@@ -1,7 +1,9 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import {
   ROUTE_MATRIX,
+  ROUTED_TASK_CLASSES,
   checkerPromptPrefix,
   resolveDispatchRoute,
   type RoutingAuthor,
@@ -522,6 +524,74 @@ describe("task routing", () => {
     assert.throws(
       () => resolveDispatchRoute({ taskClass: "general-implementation", stage: "checker", author }, profileModel),
       /author must be 'implementer'/,
+    );
+  });
+
+  it("documents every routed task class and the GLM Flash runner override in README", () => {
+    const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
+    for (const taskClass of ROUTED_TASK_CLASSES) {
+      assert.ok(readme.includes(taskClass), `README must mention ${taskClass}`);
+    }
+    assert.ok(readme.includes("glm-5.3-flash"), "README must mention glm-5.3-flash");
+  });
+
+  it("names the runner stage when authorAttemptId is missing at the dispatch seam", () => {
+    const ctx = {
+      model: { provider: "anthropic", id: "claude-sonnet-5" },
+      sessionManager: { getSessionId: () => "parent-session" },
+    };
+    const emptyRegistry = { version: 1, invocations: 0, workers: [] };
+    assert.throws(
+      () => dispatchTest.resolveSubagentRouting(
+        {
+          name: "Run",
+          task: "Run the agreed checks",
+          routing: { taskClass: "general-implementation", stage: "runner" },
+        },
+        ctx,
+        emptyRegistry,
+      ),
+      /runner requires authorAttemptId/,
+    );
+  });
+
+  it("names the checker stage when authorAttemptId is missing at the dispatch seam", () => {
+    const ctx = {
+      model: { provider: "anthropic", id: "claude-sonnet-5" },
+      sessionManager: { getSessionId: () => "parent-session" },
+    };
+    const emptyRegistry = { version: 1, invocations: 0, workers: [] };
+    assert.throws(
+      () => dispatchTest.resolveSubagentRouting(
+        {
+          name: "Check",
+          task: "Inspect the actual diff",
+          routing: { taskClass: "general-implementation", stage: "checker" },
+        },
+        ctx,
+        emptyRegistry,
+      ),
+      /checker requires authorAttemptId/,
+    );
+  });
+
+  it("refuses tiny-edit runner at the dispatch seam with its own no-runner-stage message", () => {
+    const ctx = {
+      model: { provider: "anthropic", id: "claude-sonnet-5" },
+      sessionManager: { getSessionId: () => "parent-session" },
+    };
+    const emptyRegistry = { version: 1, invocations: 0, workers: [] };
+    assert.throws(
+      () => dispatchTest.resolveSubagentRouting(
+        {
+          name: "Run",
+          task: "Run the inline edit checks",
+          routing: { taskClass: "tiny-edit", stage: "runner" },
+        },
+        ctx,
+        emptyRegistry,
+      ),
+      /tiny-edit has no runner stage/,
     );
   });
 });

@@ -204,6 +204,9 @@ export function resolveDispatchRoute(request: RoutingRequest, profileModel: Prof
   }
 
   if (taskClass === "tiny-edit") {
+    if (stage === "runner") {
+      throw new Error("Routing refused: tiny-edit has no runner stage");
+    }
     // stage === "checker": tiny-edit stay-here author never records an identity
     // (no attempt, no observed model), so there is nothing a checker could
     // verify against. Reject before launch instead of guessing the author
