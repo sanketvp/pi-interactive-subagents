@@ -13,6 +13,7 @@ import {
   chmodSync,
   closeSync,
   constants,
+  fstatSync,
   lstatSync,
   mkdirSync,
   openSync,
@@ -167,7 +168,7 @@ function mkdirNoFollow(root: string, relDir: string): void {
       st = lstatSync(cur);
     } catch {
       mkdirSync(cur, { mode: 0o700 });
-      continue;
+      st = lstatSync(cur);
     }
     if (st.isSymbolicLink()) throw new UnsupportedTree(`symlink in path: ${relDir}`);
     if (!st.isDirectory()) throw new UnsupportedTree(`directory/file conflict at ${relDir}`);
@@ -189,15 +190,45 @@ function assertNoSymlinkComponent(root: string, rel: string): void {
   }
 }
 
-/** TODO(PR-3): replace with protected.safeOpenForWrite (openat walk, O_NOFOLLOW). This is an interim guard. */
-function writeFileNoFollow(abs: string, bytes: Buffer, mode: number): void {
-  let st;
-  try {
-    st = lstatSync(abs);
-  } catch {
-    st = null;
+function assertPathWithinRoot(root: string, rel: string): void {
+  if (!rel || rel.includes("\0") || rel.includes("\\") || rel.startsWith("/")) {
+    throw new UnsupportedTree(`path escapes tree: ${rel}`);
   }
-  if (st?.isSymbolicLink()) throw new UnsupportedTree(`symlink in path: ${abs}`);
+  const parts = rel.split("/");
+  if (parts.some((part) => part === "" || part === "." || part === "..")) {
+    throw new UnsupportedTree(`path escapes tree: ${rel}`);
+  }
+  const resolvedRoot = resolve(root);
+  const resolved = resolve(root, rel);
+  if (!resolved.startsWith(resolvedRoot + sep)) {
+    throw new UnsupportedTree(`path escapes tree: ${rel}`);
+  }
+}
+
+/**
+ * Openat-style write: refuse a symlink at every path component (O_NOFOLLOW),
+ * create missing intermediate dirs (0700), then O_CREAT|O_EXCL|O_NOFOLLOW the leaf.
+ */
+export function safeOpenForWrite(root: string, relPath: string, bytes: Buffer, mode: number): void {
+  assertPathWithinRoot(root, relPath);
+  const parent = dirname(relPath);
+  if (parent !== "." && parent !== "") mkdirNoFollow(root, parent);
+  const parts = relPath.split("/");
+  let cur = root;
+  for (let i = 0; i < parts.length; i++) {
+    cur = join(cur, parts[i]);
+    let st;
+    try {
+      st = lstatSync(cur);
+    } catch {
+      continue;
+    }
+    if (st.isSymbolicLink()) throw new UnsupportedTree(`symlink in path: ${relPath}`);
+    if (i < parts.length - 1 && !st.isDirectory()) {
+      throw new UnsupportedTree(`directory/file conflict at ${relPath}`);
+    }
+  }
+  const abs = cur;
   const flags = constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL;
   const nofollow = typeof constants.O_NOFOLLOW === "number" ? constants.O_NOFOLLOW : 0;
   let fd: number;
@@ -205,9 +236,19 @@ function writeFileNoFollow(abs: string, bytes: Buffer, mode: number): void {
     fd = openSync(abs, flags | nofollow, mode);
   } catch (error: any) {
     if (error?.code === "EEXIST") throw new UnsupportedTree(`case-collision or existing path: ${abs}`);
+    if (error?.code === "ELOOP") throw new UnsupportedTree(`symlink in path: ${relPath}`);
     throw error;
   }
   try {
+    const fdStat = fstatSync(fd);
+    if (!fdStat.isFile()) throw new UnsupportedTree(`symlink in path: ${relPath}`);
+    const leafStat = lstatSync(abs);
+    if (leafStat.isSymbolicLink() || !leafStat.isFile()) {
+      throw new UnsupportedTree(`symlink in path: ${relPath}`);
+    }
+    if (leafStat.dev !== fdStat.dev || leafStat.ino !== fdStat.ino) {
+      throw new UnsupportedTree(`symlink in path: ${relPath}`);
+    }
     writeSync(fd, bytes);
   } finally {
     closeSync(fd);
@@ -349,10 +390,10 @@ export function materialize(
     if (abs !== dir && !resolve(abs).startsWith(resolve(dir) + sep) && resolve(abs) !== resolve(dir)) {
       throw new UnsupportedTree(`path escapes tree: ${item.path}`);
     }
-    mkdirNoFollow(dir, dirname(item.path));
-    assertNoSymlinkComponent(dir, item.path);
     const bytes = blobs.get(item.sha) ?? Buffer.alloc(0);
     if (item.mode === "120000") {
+      mkdirNoFollow(dir, dirname(item.path));
+      assertNoSymlinkComponent(dir, item.path);
       try {
         symlinkSync(bytes.toString("utf8"), abs);
       } catch (error: any) {
@@ -368,7 +409,7 @@ export function materialize(
       });
     } else {
       const mode = item.mode === "100755" ? 0o755 : 0o644;
-      writeFileNoFollow(abs, bytes, mode);
+      safeOpenForWrite(dir, item.path, bytes, mode);
       if (item.mode === "100755") chmodSync(abs, 0o755);
       entries.push({
         path: item.path,
