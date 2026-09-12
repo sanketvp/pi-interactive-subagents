@@ -105,6 +105,7 @@ import {
   type RoutingAuthor,
   type RoutingResolution,
 } from "./routing.ts";
+import { reserveArtifactPath } from "./artifact-claim.ts";
 
 /** Absolute path to `pi-extension/subagents`. https://github.com/nodejs/node/issues/37845 */
 const SUBAGENTS_DIR = dirname(fileURLToPath(import.meta.url));
@@ -189,6 +190,12 @@ const SubagentParams = Type.Object({
       authorAttemptId: Type.Optional(
         Type.String({ description: "Completed author attempt ID. Required for non-tiny checker and runner dispatches." }),
       ),
+    }),
+  ),
+  artifactPath: Type.Optional(
+    Type.String({
+      description:
+        "Optional. Absolute or cwd-relative path this worker will write its artifact to. Reserved atomically for this attempt before launch; a second spawn naming the same canonical path is refused. Omit to use the text convention (<name>.<profile>.<attemptId>.md) with no reservation.",
     }),
   ),
 });
@@ -582,6 +589,7 @@ interface RunningSubagent {
   interactive: boolean;
   attempt?: AttemptRecord;
   watcherGeneration?: number;
+  artifactPath?: string;
 }
 
 /** All currently running subagents, keyed by id. */
@@ -1366,6 +1374,21 @@ async function launchSubagentImpl(
 
   const launchBehavior = resolveLaunchBehavior(params, agentDefs);
 
+  const reservationsDir = join(artifactDir, "reservations");
+  let artifactReservation: Awaited<ReturnType<typeof reserveArtifactPath>> | null = null;
+  if (params.artifactPath) {
+    artifactReservation = await reserveArtifactPath({
+      path: params.artifactPath,
+      baseDir: targetCwdForSession,
+      reservationsDir,
+      attemptId,
+      name: params.name,
+    });
+    if (!artifactReservation.ok) throw new Error(artifactReservation.message);
+  }
+
+  let splitAttempted = false;
+  try {
   if (launchBehavior.seededSessionMode) {
     seedSubagentSessionFile({
       mode: launchBehavior.seededSessionMode,
@@ -1471,6 +1494,10 @@ async function launchSubagentImpl(
   if (denySet.size > 0) env.PI_DENY_TOOLS = [...denySet].join(",");
   if (localAgentDir && existsSync(localAgentDir)) env.PI_CODING_AGENT_DIR = localAgentDir;
   else if (process.env.PI_CODING_AGENT_DIR) env.PI_CODING_AGENT_DIR = process.env.PI_CODING_AGENT_DIR;
+  if (artifactReservation?.ok) {
+    env.PI_SUBAGENT_ARTIFACT_PATH = artifactReservation.canonicalPath;
+    env.PI_SUBAGENT_RESERVATIONS_DIR = reservationsDir;
+  }
   const dispatcherArgs = buildDispatcherArgs({
     provider: requested.provider,
     model: requested.model,
@@ -1496,11 +1523,26 @@ async function launchSubagentImpl(
   }, adapter);
   const splitReady = persistSplitRequested(registryFile, began.registry, began.record, freezePaneStartCommand(launchScriptFile), adapter);
   commitRegistry(splitReady.registry, splitReady.record);
+  splitAttempted = true;
   const launched = invokeSplit(registryFile, splitReady.registry, splitReady.record, adapter);
   commitRegistry(launched.registry, launched.record);
-  const running = runningFromAttempt(launched.record, { activityFile, watcherGeneration });
+  const running = runningFromAttempt(launched.record, {
+    activityFile,
+    watcherGeneration,
+    ...(artifactReservation?.ok ? { artifactPath: artifactReservation.canonicalPath } : {}),
+  });
   runningSubagents.set(running.id, running);
   return running;
+  } catch (error) {
+    if (artifactReservation?.ok && !splitAttempted) {
+      try {
+        artifactReservation.release();
+      } catch {
+        // best-effort unlink; a failed launch must not poison the path
+      }
+    }
+    throw error;
+  }
 }
 
 /**
@@ -1905,7 +1947,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         "DO NOT fabricate, assume, or summarize results after calling this tool. " +
         "After spawning, either end your turn immediately, or work on other independent tasks (including spawning more subagents in parallel). The harness will wake you with the result when it is ready. " +
         "Delivery of the result message is AT-MOST-ONCE, never guaranteed exactly-once: in rare cases (parent reload/crash mid-delivery) a finished sub-agent's result may not arrive automatically. If a sub-agent you spawned seems to have gone silent, check /subagents-diagnose rather than assuming it is still running. " +
-        "If a worker must write a file, assign each worker a unique artifact path in its task text (e.g. <name>.<profile>.<attemptId>.md); never share a path between workers — concurrent writers silently overwrite each other. This is a convention you state in the task, not a parameter of this tool.",
+        "If a worker must write a file, assign each worker a unique artifact path in its task text (e.g. <name>.<profile>.<attemptId>.md); never share a path between workers — concurrent writers silently overwrite each other. Optionally pass `artifactPath` to reserve that path for this attempt before launch; a second spawn with the same path is refused. The text convention alone still works (no reservation).",
       promptSnippet:
         "Spawn a sub-agent in a dedicated terminal multiplexer pane. " +
         "This is a fire-and-forget async tool: the call returns immediately with only an acknowledgement. " +
@@ -1913,7 +1955,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         "DO NOT write polling loops, sleep/wait commands, tail/watch scripts, or repeatedly read session/log files to detect completion. DO NOT call subagents_list or any other tool to 'check' status. All of that is wasted work — the harness handles delivery for you. " +
         "DO NOT fabricate, assume, or summarize results after calling this tool. " +
         "After spawning, either end your turn immediately, or work on other independent tasks (including spawning more subagents in parallel). The harness will wake you with the result when it is ready. Delivery is at-most-once (see /subagents-diagnose if a result seems missing). " +
-        "Assign each worker a unique artifact path in its task text (e.g. <name>.<profile>.<attemptId>.md); never share a path between workers.",
+        "Assign each worker a unique artifact path in its task text (e.g. <name>.<profile>.<attemptId>.md); never share a path between workers. Optionally pass `artifactPath` to reserve that path for this attempt before launch; a second spawn with the same path is refused. The text convention alone still works (no reservation).",
       parameters: SubagentParams,
 
       async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -1994,6 +2036,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
             launchScriptFile: running.launchScriptFile,
             status: "started",
             routing: routed.resolution,
+            artifactPath: running.artifactPath,
           },
         };
       },
