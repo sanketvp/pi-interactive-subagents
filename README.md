@@ -79,13 +79,23 @@ Subagent panes are created without stealing keyboard focus (cmux, tmux). Launch 
 
 ### Bundled Agents
 
-| Agent             | Model                  | Role                                                                                     |
-| ----------------- | ---------------------- | ---------------------------------------------------------------------------------------- |
-| **planner**       | Opus (medium thinking) | Brainstorming — clarifies requirements, explores approaches, writes plans, creates todos |
-| **scout**         | Haiku                  | Fast codebase reconnaissance — maps files, patterns, conventions                         |
-| **worker**        | Sonnet                 | Implements tasks from todos — writes code, runs tests, makes polished commits            |
-| **reviewer**      | Opus (medium thinking) | Reviews code for bugs, security issues, correctness                                      |
-| **visual-tester** | Sonnet                 | Visual QA via Chrome CDP — screenshots, responsive testing, interaction testing          |
+| Agent               | Model                            | Thinking | Role                                                                              |
+| ------------------- | -------------------------------- | -------- | --------------------------------------------------------------------------------- |
+| **bulk**            | openrouter/z-ai/glm-5.3-flash    | low      | Cheap bulk work — formatting, extraction, low-stakes docs, mechanical edits       |
+| **implementer**     | xai/grok-4.6                     | high     | Feature-owner implementation: primary build engine                                |
+| **implementer-glm** | openrouter/z-ai/glm-5.3          | max      | Feature-owner implementation: cost-efficient parallel fan-out                     |
+| **implementer-gpt** | openai-codex/gpt-5.6-sol         | high     | Feature-owner implementation: alternate build engine                              |
+| **implementer-k3**  | kimi-coding/k3                   | high     | Feature-owner implementation: very large / long-context builds                    |
+| **planner**         | anthropic/claude-fable-5-1       | high     | Interactive planning — clarifies requirements, explores approaches, writes plans  |
+| **pr-reviewer**     | openai-codex/gpt-5.6-sol         | high     | PR / diff review for correctness, security, quality, test coverage                |
+| **researcher**      | anthropic/claude-opus-5          | high     | Deep research, analysis, architecture options and trade-offs                      |
+| **reviewer**        | openai-codex/gpt-5.6-sol         | high     | Adversarial plan/design/implementation review                                     |
+| **scout**           | openai-codex/gpt-5.6-terra       | medium   | Fast codebase reconnaissance — maps files, patterns, conventions                  |
+| **verifier**        | anthropic/claude-opus-5          | high     | Independent semantic verification — issues the VERDICT                            |
+| **verifier-run**    | openai-codex/gpt-5.6-luna        | medium   | Command runner for verification — evidence only, never a verdict                  |
+| **worker**          | xai/grok-4.6                     | medium   | Surgical slice ONLY (≤1 existing file, no new features)                           |
+
+Agent profiles are read live from their definition files at spawn time, so this table reflects the current global profiles. They live in `~/.pi/agent/agents/<name>.md` (global) and `.pi/agents/<name>.md` (project-local).
 
 Agent discovery follows priority: **project-local** (`.pi/agents/`) > **global** (`~/.pi/agent/agents/`) > **package-bundled**. Override any bundled agent by placing your own version in the higher-priority location.
 
