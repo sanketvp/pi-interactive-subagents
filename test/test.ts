@@ -1262,6 +1262,122 @@ describe("subagent discovery", () => {
       restoreEnvVar("PI_INTERACTIVE_TRUST_PROJECT_AGENTS", previousTrust);
     }
   });
+
+  it("lets a global agent shadow a package-bundled agent of the same name", async () => {
+    await withIsolatedAgentEnv(async ({ globalAgentsDir }) => {
+      writeAgentFile(
+        globalAgentsDir,
+        "scout",
+        [
+          "name: scout",
+          "description: Global scout override",
+          "model: anthropic/test-global-scout",
+        ].join("\n"),
+        "You are the global scout.",
+      );
+
+      const listed = testApi.discoverAgentDefinitions({ hideBundledAgents: false });
+      const scouts = listed.filter((agent: any) => agent.name === "scout");
+      assert.equal(scouts.length, 1);
+      assert.equal(scouts[0].source, "global");
+      assert.equal(scouts[0].model, "anthropic/test-global-scout");
+      assert.equal(
+        listed.some((agent: any) => agent.name === "scout" && agent.source === "package"),
+        false,
+      );
+    });
+  });
+
+  it("lets a project agent shadow a package-bundled agent of the same name", async () => {
+    await withIsolatedAgentEnv(async ({ projectAgentsDir }) => {
+      writeAgentFile(
+        projectAgentsDir,
+        "scout",
+        [
+          "name: scout",
+          "description: Project scout override",
+          "model: anthropic/test-project-scout",
+        ].join("\n"),
+        "You are the project scout.",
+      );
+
+      const listed = testApi.discoverAgentDefinitions({ hideBundledAgents: false });
+      const scouts = listed.filter((agent: any) => agent.name === "scout");
+      assert.equal(scouts.length, 1);
+      assert.equal(scouts[0].source, "project");
+      assert.equal(scouts[0].model, "anthropic/test-project-scout");
+    });
+  });
+
+  it("filterListedAgents omits package-bundled agents when hideBundledAgents is true", () => {
+    const listed = [
+      { name: "scout", source: "package", disableModelInvocation: false },
+      { name: "custom", source: "global", disableModelInvocation: false },
+      { name: "local", source: "project", disableModelInvocation: false },
+    ];
+    const filtered = testApi.filterListedAgents(listed, { hideBundledAgents: true });
+    assert.deepEqual(
+      filtered.map((agent: any) => `${agent.source}:${agent.name}`),
+      ["global:custom", "project:local"],
+    );
+  });
+
+  it("filterListedAgents keeps bundled agents when hideBundledAgents is false or absent", () => {
+    const listed = [
+      { name: "scout", source: "package", disableModelInvocation: false },
+      { name: "custom", source: "global", disableModelInvocation: false },
+    ];
+    assert.equal(testApi.filterListedAgents(listed).length, 2);
+    assert.equal(testApi.filterListedAgents(listed, { hideBundledAgents: false }).length, 2);
+  });
+
+  it("discoverAgentDefinitions omits bundled agents when hideBundledAgents is true", async () => {
+    await withIsolatedAgentEnv(async ({ projectAgentsDir, globalAgentsDir }) => {
+      writeAgentFile(
+        projectAgentsDir,
+        "custom-local",
+        ["name: custom-local", "model: anthropic/test-local"].join("\n"),
+      );
+      writeAgentFile(
+        globalAgentsDir,
+        "scout",
+        ["name: scout", "model: anthropic/test-global-scout"].join("\n"),
+        "You are the global scout.",
+      );
+
+      const listed = testApi.discoverAgentDefinitions({ hideBundledAgents: true });
+      assert.equal(listed.some((agent: any) => agent.source === "package"), false);
+      assert.ok(listed.some((agent: any) => agent.name === "custom-local" && agent.source === "project"));
+      const scouts = listed.filter((agent: any) => agent.name === "scout");
+      assert.equal(scouts.length, 1);
+      assert.equal(scouts[0].source, "global");
+    });
+  });
+
+  it("discoverAgentDefinitions keeps bundled agents when the flag is absent", async () => {
+    await withIsolatedAgentEnv(async ({ globalDir }) => {
+      const listed = testApi.discoverAgentDefinitions({
+        configPath: join(globalDir, "no-such-config.json"),
+      });
+      assert.ok(listed.some((agent: any) => agent.name === "scout" && agent.source === "package"));
+    });
+  });
+
+  it("readHideBundledAgents is false unless the flag is boolean true", () => {
+    withTempDir((dir) => {
+      assert.equal(testApi.readHideBundledAgents(join(dir, "missing.json")), false);
+
+      const configPath = join(dir, "config.json");
+      writeFileSync(configPath, JSON.stringify({ status: { enabled: true } }));
+      assert.equal(testApi.readHideBundledAgents(configPath), false);
+
+      writeFileSync(configPath, JSON.stringify({ hideBundledAgents: false }));
+      assert.equal(testApi.readHideBundledAgents(configPath), false);
+
+      writeFileSync(configPath, JSON.stringify({ hideBundledAgents: true }));
+      assert.equal(testApi.readHideBundledAgents(configPath), true);
+    });
+  });
 });
 describe("subagent-done.ts", () => {
   describe("shouldMarkUserTookOver", () => {

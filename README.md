@@ -87,7 +87,7 @@ Subagent panes are created without stealing keyboard focus (cmux, tmux). Launch 
 | **reviewer**      | Opus (medium thinking) | Reviews code for bugs, security issues, correctness                                      |
 | **visual-tester** | Sonnet                 | Visual QA via Chrome CDP — screenshots, responsive testing, interaction testing          |
 
-Agent discovery follows priority: **project-local** (`.pi/agents/`) > **global** (`~/.pi/agent/agents/`) > **package-bundled**. Override any bundled agent by placing your own version in the higher-priority location.
+Agent discovery follows priority: **project-local** (`.pi/agents/`) > **global** (`~/.pi/agent/agents/`) > **package-bundled**. Override any bundled agent by placing your own version in the higher-priority location. Set `hideBundledAgents: true` in `config.json` to omit all package-bundled agents from `subagents_list` (overrides of those names still appear).
 
 ---
 
@@ -139,9 +139,12 @@ cp config.json.example config.json
 {
   "status": {
     "enabled": true
-  }
+  },
+  "hideBundledAgents": false
 }
 ```
+
+`hideBundledAgents` defaults to `false`. When `true`, `subagents_list` omits package-bundled agents. Absent config preserves the default.
 
 `config.json` is gitignored so local overrides don't get committed.
 
