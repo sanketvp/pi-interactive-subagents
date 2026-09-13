@@ -1,0 +1,49 @@
+{
+  "status": "superseded-needs-Sol-binding-corrections-not-approved",
+  "files": [
+    {
+      "file": "worker-attempt.lifecycle.json",
+      "sha256": "d5f444aff6eaa62566728454e81ec88065bcec6cee949568659917c6bfae230e"
+    },
+    {
+      "file": "worker-attempt-lifecycle.html",
+      "sha256": "462c42939d1ed0d2b9a301b48f3692a75cfda8ec78badca3d4af43708c26f871"
+    },
+    {
+      "file": "deliver-receipt.json",
+      "sha256": "3850ea277d00f54711887ffea72f0e5032c10d609b4b89764675a4d1e2716af9"
+    },
+    {
+      "file": "validate-final.json",
+      "sha256": "6b1ba5ac2502a4d72982d1371d6b1b60bd9dc95945bee2bf25488e06af0eedb1"
+    },
+    {
+      "file": "visual-check-receipt.json",
+      "sha256": "1704df42573de3a7e2a8cb708722b30f7fe2fa76af23008cea784e7448e11728"
+    },
+    {
+      "file": "worker-attempt-lifecycle.visual-check.json",
+      "sha256": "1704df42573de3a7e2a8cb708722b30f7fe2fa76af23008cea784e7448e11728"
+    },
+    {
+      "file": "worker-attempt-lifecycle.visual-check.html",
+      "sha256": "ceffdfbcc8cd19c29af756328c20f74cc8d857ce8227a1e42528ac3525ca2f7c"
+    },
+    {
+      "file": "worker-attempt-lifecycle.visual-check.1440x900.dark.png",
+      "sha256": "2dc4cc263f8e026368ef466476988ee9b6787115122799da2d500aa8e2ca796c"
+    },
+    {
+      "file": "worker-attempt-lifecycle.visual-check.2048x1320.light.png",
+      "sha256": "0e4428b3e92f8e4d691e45a6242bd26851c04ed57abadd199edd1b8374a52a4d"
+    },
+    {
+      "file": "worker-attempt-lifecycle.visual-check.1440x900.light.png",
+      "sha256": "f4ccdaddea0dfa45a54cb56ad1c598188472dfa119bf9cc3825c33da46ef0789"
+    },
+    {
+      "file": "worker-attempt-lifecycle.visual-check.2048x1320.dark.png",
+      "sha256": "56736cfbb0f1cee8e7bfe8e3e78491a98d5c55ffd7c387117f45b6cf051e4178"
+    }
+  ]
+}

@@ -4,7 +4,10 @@ import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, rmSync } from "nod
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { visibleWidth } from "@mariozechner/pi-tui";
+import { execFileSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import { createDefaultAdapter, setLifecycleAdapter } from "../pi-extension/subagents/adapter.ts";
+import { visibleWidth } from "@earendil-works/pi-tui";
 import * as subagentsModule from "../pi-extension/subagents/index.ts";
 
 import {
@@ -84,14 +87,18 @@ function createMockExtensionApi() {
   const registeredMessageRenderers: Array<any> = [];
   const sentUserMessages: string[] = [];
   const sentMessages: Array<any> = [];
+  const eventHandlers: Record<string, Function[]> = {};
   return {
     registeredTools,
     registeredCommands,
     registeredMessageRenderers,
     sentUserMessages,
     sentMessages,
+    eventHandlers,
     api: {
-      on() {},
+      on(event: string, handler: Function) {
+        (eventHandlers[event] ??= []).push(handler);
+      },
       registerTool(tool: any) {
         registeredTools.push(tool);
       },
@@ -154,6 +161,7 @@ async function withIsolatedAgentEnv(
   const root = createTestDir();
   const previousCwd = process.cwd();
   const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  const previousTrust = process.env.PI_INTERACTIVE_TRUST_PROJECT_AGENTS;
   const projectDir = join(root, "project");
   const projectAgentsDir = join(projectDir, ".pi", "agents");
   const globalDir = join(root, "global");
@@ -163,12 +171,14 @@ async function withIsolatedAgentEnv(
   mkdirSync(globalAgentsDir, { recursive: true });
   process.chdir(projectDir);
   process.env.PI_CODING_AGENT_DIR = globalDir;
+  process.env.PI_INTERACTIVE_TRUST_PROJECT_AGENTS = "1";
 
   try {
     await fn({ projectDir, projectAgentsDir, globalDir, globalAgentsDir });
   } finally {
     process.chdir(previousCwd);
     restoreEnvVar("PI_CODING_AGENT_DIR", previousAgentDir);
+    restoreEnvVar("PI_INTERACTIVE_TRUST_PROJECT_AGENTS", previousTrust);
     rmSync(root, { recursive: true, force: true });
   }
 }
@@ -1215,6 +1225,159 @@ describe("subagent discovery", () => {
       assert.equal(loaded.disableModelInvocation, true);
     });
   });
+
+  it("does not list or load project agents when trust opt-in is unset", async () => {
+    const previousTrust = process.env.PI_INTERACTIVE_TRUST_PROJECT_AGENTS;
+    delete process.env.PI_INTERACTIVE_TRUST_PROJECT_AGENTS;
+    try {
+      await withIsolatedAgentEnv(async ({ projectAgentsDir, globalAgentsDir }) => {
+        delete process.env.PI_INTERACTIVE_TRUST_PROJECT_AGENTS;
+        writeAgentFile(
+          projectAgentsDir,
+          "untrusted-project-agent",
+          ["name: untrusted-project-agent", "model: anthropic/test-untrusted"].join("\n"),
+          "You are the untrusted project agent.",
+        );
+        writeAgentFile(
+          globalAgentsDir,
+          "trusted-global-agent",
+          ["name: trusted-global-agent", "model: anthropic/test-global"].join("\n"),
+          "You are the global agent.",
+        );
+        const { api, registeredTools } = createMockExtensionApi();
+        (subagentsModule as any).default(api);
+        const tool = registeredTools.find((tool) => tool.name === "subagents_list");
+        assert.ok(tool);
+        const result = await tool.execute();
+        const agents = result.details?.agents ?? [];
+        assert.equal(agents.some((agent: any) => agent.name === "untrusted-project-agent"), false);
+        assert.equal(testApi.loadAgentDefaults("untrusted-project-agent"), null);
+        const globalLoaded = testApi.loadAgentDefaults("trusted-global-agent");
+        assert.ok(globalLoaded);
+        assert.equal(globalLoaded.model, "anthropic/test-global");
+        const scout = testApi.loadAgentDefaults("scout");
+        assert.ok(scout, "package agents still resolve without project trust");
+      });
+    } finally {
+      restoreEnvVar("PI_INTERACTIVE_TRUST_PROJECT_AGENTS", previousTrust);
+    }
+  });
+
+  it("lets a global agent shadow a package-bundled agent of the same name", async () => {
+    await withIsolatedAgentEnv(async ({ globalAgentsDir }) => {
+      writeAgentFile(
+        globalAgentsDir,
+        "scout",
+        [
+          "name: scout",
+          "description: Global scout override",
+          "model: anthropic/test-global-scout",
+        ].join("\n"),
+        "You are the global scout.",
+      );
+
+      const listed = testApi.discoverAgentDefinitions({ hideBundledAgents: false });
+      const scouts = listed.filter((agent: any) => agent.name === "scout");
+      assert.equal(scouts.length, 1);
+      assert.equal(scouts[0].source, "global");
+      assert.equal(scouts[0].model, "anthropic/test-global-scout");
+      assert.equal(
+        listed.some((agent: any) => agent.name === "scout" && agent.source === "package"),
+        false,
+      );
+    });
+  });
+
+  it("lets a project agent shadow a package-bundled agent of the same name", async () => {
+    await withIsolatedAgentEnv(async ({ projectAgentsDir }) => {
+      writeAgentFile(
+        projectAgentsDir,
+        "scout",
+        [
+          "name: scout",
+          "description: Project scout override",
+          "model: anthropic/test-project-scout",
+        ].join("\n"),
+        "You are the project scout.",
+      );
+
+      const listed = testApi.discoverAgentDefinitions({ hideBundledAgents: false });
+      const scouts = listed.filter((agent: any) => agent.name === "scout");
+      assert.equal(scouts.length, 1);
+      assert.equal(scouts[0].source, "project");
+      assert.equal(scouts[0].model, "anthropic/test-project-scout");
+    });
+  });
+
+  it("filterListedAgents omits package-bundled agents when hideBundledAgents is true", () => {
+    const listed = [
+      { name: "scout", source: "package", disableModelInvocation: false },
+      { name: "custom", source: "global", disableModelInvocation: false },
+      { name: "local", source: "project", disableModelInvocation: false },
+    ];
+    const filtered = testApi.filterListedAgents(listed, { hideBundledAgents: true });
+    assert.deepEqual(
+      filtered.map((agent: any) => `${agent.source}:${agent.name}`),
+      ["global:custom", "project:local"],
+    );
+  });
+
+  it("filterListedAgents keeps bundled agents when hideBundledAgents is false or absent", () => {
+    const listed = [
+      { name: "scout", source: "package", disableModelInvocation: false },
+      { name: "custom", source: "global", disableModelInvocation: false },
+    ];
+    assert.equal(testApi.filterListedAgents(listed).length, 2);
+    assert.equal(testApi.filterListedAgents(listed, { hideBundledAgents: false }).length, 2);
+  });
+
+  it("discoverAgentDefinitions omits bundled agents when hideBundledAgents is true", async () => {
+    await withIsolatedAgentEnv(async ({ projectAgentsDir, globalAgentsDir }) => {
+      writeAgentFile(
+        projectAgentsDir,
+        "custom-local",
+        ["name: custom-local", "model: anthropic/test-local"].join("\n"),
+      );
+      writeAgentFile(
+        globalAgentsDir,
+        "scout",
+        ["name: scout", "model: anthropic/test-global-scout"].join("\n"),
+        "You are the global scout.",
+      );
+
+      const listed = testApi.discoverAgentDefinitions({ hideBundledAgents: true });
+      assert.equal(listed.some((agent: any) => agent.source === "package"), false);
+      assert.ok(listed.some((agent: any) => agent.name === "custom-local" && agent.source === "project"));
+      const scouts = listed.filter((agent: any) => agent.name === "scout");
+      assert.equal(scouts.length, 1);
+      assert.equal(scouts[0].source, "global");
+    });
+  });
+
+  it("discoverAgentDefinitions keeps bundled agents when the flag is absent", async () => {
+    await withIsolatedAgentEnv(async ({ globalDir }) => {
+      const listed = testApi.discoverAgentDefinitions({
+        configPath: join(globalDir, "no-such-config.json"),
+      });
+      assert.ok(listed.some((agent: any) => agent.name === "scout" && agent.source === "package"));
+    });
+  });
+
+  it("readHideBundledAgents is false unless the flag is boolean true", () => {
+    withTempDir((dir) => {
+      assert.equal(testApi.readHideBundledAgents(join(dir, "missing.json")), false);
+
+      const configPath = join(dir, "config.json");
+      writeFileSync(configPath, JSON.stringify({ status: { enabled: true } }));
+      assert.equal(testApi.readHideBundledAgents(configPath), false);
+
+      writeFileSync(configPath, JSON.stringify({ hideBundledAgents: false }));
+      assert.equal(testApi.readHideBundledAgents(configPath), false);
+
+      writeFileSync(configPath, JSON.stringify({ hideBundledAgents: true }));
+      assert.equal(testApi.readHideBundledAgents(configPath), true);
+    });
+  });
 });
 describe("subagent-done.ts", () => {
   describe("shouldMarkUserTookOver", () => {
@@ -1233,9 +1396,9 @@ describe("subagent-done.ts", () => {
       assert.equal(shouldAutoExitOnAgentEnd(false, messages), true);
     });
 
-    it("auto-exits after normal completion even when the user sent the prompt", () => {
+    it("retains the worker after the user takes over", () => {
       const messages = [{ role: "assistant", stopReason: "stop" }];
-      assert.equal(shouldAutoExitOnAgentEnd(true, messages), true);
+      assert.equal(shouldAutoExitOnAgentEnd(true, messages), false);
     });
 
     it("stays open after Escape aborts the run", () => {
@@ -1337,9 +1500,9 @@ describe("cmux.ts interpretExitSidecar", () => {
     assert.match(result.errorMessage ?? "", /no errorMessage/);
   });
 
-  it("treats unknown payload shapes as done", () => {
-    assert.deepEqual(interpretExitSidecar({}), { reason: "done", exitCode: 0 });
-    assert.deepEqual(interpretExitSidecar(null), { reason: "done", exitCode: 0 });
+  it("rejects unknown payload shapes instead of claiming success", () => {
+    assert.throws(() => interpretExitSidecar({}));
+    assert.throws(() => interpretExitSidecar(null));
   });
 });
 describe("commands", () => {
@@ -1414,6 +1577,131 @@ describe("tool registration", () => {
     assert.equal(autoExitSchema.type, "boolean");
     assert.match(autoExitSchema.description, /Defaults to true/);
   });
+
+  it(
+    "registered subagent tool: append/replace system-prompt agents pass the flag+artifact through captured dispatcher argv; a plain spawn passes neither",
+    { timeout: 20000 },
+    async () => {
+      const socketName = "pi-test-sysprompt-" + randomUUID();
+      const tmux = (...args: string[]) =>
+        execFileSync("tmux", ["-L", socketName, "-f", "/dev/null", ...args], { encoding: "utf8", timeout: 3000 }).trim();
+      const root = createTestDir();
+      const previousTmux = process.env.TMUX;
+      const previousTmuxPane = process.env.TMUX_PANE;
+      const spawnedIds: string[] = [];
+      const testApi = (subagentsModule as any).__test__;
+
+      try {
+        tmux("new-session", "-d", "-x", "120", "-y", "40", "-s", "w", "/bin/sh");
+        const parentPane = tmux("display-message", "-p", "-t", "w", "#{pane_id}");
+        const socketPath = tmux("display-message", "-p", "-t", parentPane, "#{socket_path}");
+
+        await withIsolatedAgentEnv(async ({ projectDir, projectAgentsDir }) => {
+          writeAgentFile(
+            projectAgentsDir,
+            "append-sysprompt-agent",
+            ["name: append-sysprompt-agent", "model: xai/grok-4.6", "system-prompt: append", "auto-exit: true"].join("\n"),
+            "You are the append-mode test identity.",
+          );
+          writeAgentFile(
+            projectAgentsDir,
+            "replace-sysprompt-agent",
+            ["name: replace-sysprompt-agent", "model: xai/grok-4.6", "system-prompt: replace", "auto-exit: true"].join("\n"),
+            "You are the replace-mode test identity.",
+          );
+
+          const { api, registeredTools, eventHandlers } = createMockExtensionApi();
+          (subagentsModule as any).default(api);
+          const subagentTool = registeredTools.find((tool: any) => tool.name === "subagent");
+          assert.ok(subagentTool, "expected subagent tool to be registered");
+
+          const adapter = createDefaultAdapter();
+          setLifecycleAdapter(adapter);
+
+          const sessionsDir = join(root, "sessions");
+          mkdirSync(sessionsDir, { recursive: true });
+          const parentSessionFile = join(root, "parent.jsonl");
+          writeFileSync(parentSessionFile, JSON.stringify({ type: "session", id: randomUUID() }) + "\n");
+          const parentSessionId = randomUUID();
+
+          const ctx: any = {
+            mode: "tui",
+            hasUI: true,
+            ui: { notify() {}, setWidget() {}, confirm: async () => false },
+            cwd: projectDir,
+            model: { provider: "xai", id: "grok-4.6" },
+            thinkingLevel: "high",
+            sessionManager: {
+              getSessionFile: () => parentSessionFile,
+              getSessionId: () => parentSessionId,
+              getSessionDir: () => sessionsDir,
+            },
+          };
+
+          process.env.TMUX = `${socketPath},0,0`;
+          process.env.TMUX_PANE = parentPane;
+          // session_start is what flips registryReady=true and initializes registryFile.
+          eventHandlers.session_start[0]({ reason: "startup" }, ctx);
+
+          async function launchAndReadArgv(agentName: string) {
+            const result = await subagentTool.execute(
+              "tc-" + randomUUID(),
+              { name: agentName, task: "do the thing", agent: agentName },
+              undefined,
+              undefined,
+              ctx,
+            );
+            const id = result.details?.id;
+            assert.ok(id, `expected launch to return a running id for ${agentName}`);
+            spawnedIds.push(id);
+            const scriptBody = readFileSync(result.details.launchScriptFile, "utf8");
+            return scriptBody;
+          }
+
+          const appendArgv = await launchAndReadArgv("append-sysprompt-agent");
+          assert.match(appendArgv, /--append-system-prompt/);
+          assert.doesNotMatch(appendArgv, /\n\s*'--system-prompt'\n/);
+          const appendPathMatch = appendArgv.match(/'--append-system-prompt'\n\s*'([^']+sysprompt[^']+)'/);
+          assert.ok(appendPathMatch, "expected a captured --append-system-prompt artifact path in argv");
+          assert.equal(readFileSync(appendPathMatch![1], "utf8"), "You are the append-mode test identity.");
+
+          const replaceArgv = await launchAndReadArgv("replace-sysprompt-agent");
+          assert.match(replaceArgv, /'--system-prompt'/);
+          assert.doesNotMatch(replaceArgv, /--append-system-prompt/);
+          const replacePathMatch = replaceArgv.match(/'--system-prompt'\n\s*'([^']+sysprompt[^']+)'/);
+          assert.ok(replacePathMatch, "expected a captured --system-prompt artifact path in argv");
+          assert.equal(readFileSync(replacePathMatch![1], "utf8"), "You are the replace-mode test identity.");
+
+          // A plain spawn with no agent (no system-prompt frontmatter) must pass NEITHER flag.
+          const plainResult = await subagentTool.execute(
+            "tc-" + randomUUID(),
+            { name: "plain", task: "do the thing" },
+            undefined,
+            undefined,
+            ctx,
+          );
+          spawnedIds.push(plainResult.details.id);
+          const plainArgv = readFileSync(plainResult.details.launchScriptFile, "utf8");
+          assert.doesNotMatch(plainArgv, /system-prompt/);
+        });
+      } finally {
+        for (const id of spawnedIds) {
+          const running = testApi.runningSubagents.get(id);
+          running?.abortController?.abort();
+          testApi.runningSubagents.delete(id);
+        }
+        if (previousTmux === undefined) delete process.env.TMUX;
+        else process.env.TMUX = previousTmux;
+        if (previousTmuxPane === undefined) delete process.env.TMUX_PANE;
+        else process.env.TMUX_PANE = previousTmuxPane;
+        try {
+          execFileSync("tmux", ["-L", socketName, "kill-server"], { encoding: "utf8", timeout: 3000 });
+        } catch {}
+        setLifecycleAdapter(null);
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
 });
 
 describe("subagent activity snapshots", () => {
@@ -1589,12 +1877,48 @@ describe("subagent activity snapshots", () => {
 });
 
 describe("subagent interruption", () => {
+  // Interrupt must only ever target an exact owned tmux pane (`%N`) on the
+  // CURRENT tmux socket (finding P1-3). Fixtures therefore use a real pane
+  // id + matching tmuxSocket, and the current process.env.TMUX is pointed
+  // at that same socket for the duration of this suite.
+  const TEST_SOCKET = "/tmp/pi-interrupt-test-sock";
+  // isExactOwnedSurface (close-to-scope fix): `%N` format + matching socket
+  // alone is not proof of CURRENT ownership -- it also verifies the pane's
+  // live @pi-worker-token tag via readPaneToken, the same ownership proof
+  // release/close already require. Inject a fake adapter so these tests
+  // don't need a real tmux server: pane "%1" answers with FAKE_TOKEN, any
+  // other pane/query fails (proving no other tmux call should occur).
+  const FAKE_TOKEN = "fake-owned-token";
+  let previousTmux: string | undefined;
+  before(() => {
+    previousTmux = process.env.TMUX;
+    process.env.TMUX = `${TEST_SOCKET},0,0`;
+    setLifecycleAdapter({
+      ...createDefaultAdapter(),
+      tmux(args: string[]) {
+        if (args.includes("show-options")) {
+          const t = args[args.indexOf("-t") + 1];
+          if (t === "%1") return FAKE_TOKEN;
+          throw new Error(`no such pane: ${t}`);
+        }
+        throw new Error(`unexpected tmux call in interrupt tests: ${args.join(" ")}`);
+      },
+    });
+  });
+  after(() => {
+    if (previousTmux === undefined) delete process.env.TMUX;
+    else process.env.TMUX = previousTmux;
+    setLifecycleAdapter(null);
+  });
+
   function makeRunning(overrides: Record<string, unknown> = {}) {
     return {
       id: "a1",
       name: "Worker",
       task: "",
-      surface: "pane-1",
+      surface: "%1",
+      tmuxSocket: TEST_SOCKET,
+      completionToken: FAKE_TOKEN,
       startTime: 0,
       sessionFile: "worker.jsonl",
       interactive: false,
@@ -1651,6 +1975,59 @@ describe("subagent interruption", () => {
     assert.equal("interruptRequested" in running, false);
   });
 
+  it("refuses interrupt and issues zero tmux calls for an empty/foreign/malformed surface", () => {
+    const testApi = (subagentsModule as any).__test__;
+    let calls = 0;
+    const bump = () => { calls += 1; };
+
+    const empty = testApi.requestSubagentInterrupt(makeRunning({ surface: "" }), bump);
+    assert.match(empty.error, /Refusing to interrupt/);
+
+    const malformed = testApi.requestSubagentInterrupt(makeRunning({ surface: "pane-1" }), bump);
+    assert.match(malformed.error, /Refusing to interrupt/);
+
+    const foreignSocket = testApi.requestSubagentInterrupt(
+      makeRunning({ tmuxSocket: "/tmp/some-other-socket" }),
+      bump,
+    );
+    assert.match(foreignSocket.error, /Refusing to interrupt/);
+
+    const noSocket = testApi.requestSubagentInterrupt(makeRunning({ tmuxSocket: undefined }), bump);
+    assert.match(noSocket.error, /Refusing to interrupt/);
+
+    assert.equal(calls, 0, "no tmux call should have been issued for any invalid surface");
+
+    const valid = testApi.requestSubagentInterrupt(makeRunning(), bump);
+    assert.deepEqual(valid, { ok: true });
+    assert.equal(calls, 1);
+  });
+
+  it("refuses interrupt when the pane's live ownership tag does not match the record, despite a well-formed %N surface on the current socket", () => {
+    // `%N` format + matching socket is NOT proof of current ownership: tmux
+    // pane ids can be reused/collide across separate tmux server processes
+    // bound to the same socket path. A stale/foreign record with the right
+    // shape but the wrong (or no longer matching) completionToken must be
+    // refused with zero Escape sends, exactly like release/close already
+    // require exact-token ownership before mutating a pane.
+    const testApi = (subagentsModule as any).__test__;
+    let calls = 0;
+    const bump = () => { calls += 1; };
+
+    const wrongToken = testApi.requestSubagentInterrupt(makeRunning({ completionToken: "not-the-real-token" }), bump);
+    assert.match(wrongToken.error, /Refusing to interrupt/);
+    assert.equal(calls, 0);
+
+    const noToken = testApi.requestSubagentInterrupt(makeRunning({ completionToken: undefined }), bump);
+    assert.match(noToken.error, /Refusing to interrupt/);
+    assert.equal(calls, 0);
+
+    // A record whose surface matches format+socket but points at an
+    // untracked pane (readPaneToken throws "no such pane") is refused too.
+    const untrackedPane = testApi.requestSubagentInterrupt(makeRunning({ surface: "%99" }), bump);
+    assert.match(untrackedPane.error, /Refusing to interrupt/);
+    assert.equal(calls, 0);
+  });
+
   it("leaves status unchanged when Escape delivery fails in the tool path", () => {
     const testApi = (subagentsModule as any).__test__;
     const runningMap = testApi.runningSubagents as Map<string, any>;
@@ -1702,7 +2079,7 @@ describe("subagent interruption", () => {
     });
 
     assert.deepEqual(result, { ok: true });
-    assert.equal(sentSurface, "pane-1");
+    assert.equal(sentSurface, "%1");
     assert.equal(aborted, false);
     assert.equal("interruptRequested" in running, false);
   });
@@ -1744,7 +2121,7 @@ describe("subagent interruption", () => {
           sentSurface = surface;
         }));
 
-        assert.equal(sentSurface, "pane-1");
+        assert.equal(sentSurface, "%1");
         const state = runningMap.get("a1").statusState;
         const snapshot = classifyStatus(state, 20_000);
         assert.equal(snapshot.kind, "waiting");
@@ -1786,7 +2163,7 @@ describe("subagent interruption", () => {
         sentSurface = surface;
       }));
 
-      assert.equal(sentSurface, "pane-1");
+      assert.equal(sentSurface, "%1");
       assert.equal(result.content[0].text, 'Interrupt requested for subagent "Worker".');
       assert.deepEqual(result.details, { id: "a1", name: "Worker", status: "interrupt_requested" });
       const snapshot = classifyStatus(runningMap.get("a1").statusState, 20_000);
@@ -1814,7 +2191,7 @@ describe("subagent interruption", () => {
         surfaces.push(surface);
       });
 
-      assert.deepEqual(surfaces, ["pane-1", "pane-1"]);
+      assert.deepEqual(surfaces, ["%1", "%1"]);
       assert.equal(runningMap.has("a1"), true);
     } finally {
       runningMap.clear();

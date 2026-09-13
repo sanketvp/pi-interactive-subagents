@@ -77,17 +77,27 @@ Subagent panes are created without stealing keyboard focus (cmux, tmux). Launch 
 | `/iterate`                 | Fork into a subagent for quick fixes |
 | `/subagent <agent> <task>` | Spawn a named agent directly         |
 
-### Bundled Agents
+### Agent Profiles (global, read live at spawn)
 
-| Agent             | Model                  | Role                                                                                     |
-| ----------------- | ---------------------- | ---------------------------------------------------------------------------------------- |
-| **planner**       | Opus (medium thinking) | Brainstorming — clarifies requirements, explores approaches, writes plans, creates todos |
-| **scout**         | Haiku                  | Fast codebase reconnaissance — maps files, patterns, conventions                         |
-| **worker**        | Sonnet                 | Implements tasks from todos — writes code, runs tests, makes polished commits            |
-| **reviewer**      | Opus (medium thinking) | Reviews code for bugs, security issues, correctness                                      |
-| **visual-tester** | Sonnet                 | Visual QA via Chrome CDP — screenshots, responsive testing, interaction testing          |
+| Agent               | Model                            | Thinking | Role                                                                              |
+| ------------------- | -------------------------------- | -------- | --------------------------------------------------------------------------------- |
+| **bulk**            | openrouter/z-ai/glm-5.3-flash    | low      | Cheap bulk work — formatting, extraction, low-stakes docs, mechanical edits       |
+| **implementer**     | xai/grok-4.6                     | high     | Feature-owner implementation: primary build engine                                |
+| **implementer-glm** | openrouter/z-ai/glm-5.3          | max      | Feature-owner implementation: cost-efficient parallel fan-out                     |
+| **implementer-gpt** | openai-codex/gpt-5.6-sol         | high     | Feature-owner implementation: alternate build engine                              |
+| **implementer-k3**  | kimi-coding/k3                   | high     | Feature-owner implementation: very large / long-context builds                    |
+| **planner**         | anthropic/claude-fable-5-1       | high     | Interactive planning — clarifies requirements, explores approaches, writes plans  |
+| **pr-reviewer**     | openai-codex/gpt-5.6-sol         | high     | PR / diff review for correctness, security, quality, test coverage                |
+| **researcher**      | anthropic/claude-opus-5          | high     | Deep research, analysis, architecture options and trade-offs                      |
+| **reviewer**        | openai-codex/gpt-5.6-sol         | high     | Adversarial plan/design/implementation review                                     |
+| **scout**           | openai-codex/gpt-5.6-terra       | medium   | Fast codebase reconnaissance — maps files, patterns, conventions                  |
+| **verifier**        | anthropic/claude-opus-5          | high     | Independent semantic verification — issues the VERDICT                            |
+| **verifier-run**    | openai-codex/gpt-5.6-luna        | medium   | Command runner for verification — evidence only, never a verdict                  |
+| **worker**          | xai/grok-4.6                     | medium   | Surgical slice ONLY (≤1 existing file, no new features)                           |
 
-Agent discovery follows priority: **project-local** (`.pi/agents/`) > **global** (`~/.pi/agent/agents/`) > **package-bundled**. Override any bundled agent by placing your own version in the higher-priority location.
+Agent profiles are read live at spawn from their definition files. This markdown table is a snapshot and does not auto-update. Precedence: project `.pi/agents/` > global `~/.pi/agent/agents/` > package `agents/`.
+
+Agent discovery follows priority: **project-local** (`.pi/agents/`) > **global** (`~/.pi/agent/agents/`) > **package-bundled**. Override any bundled agent by placing your own version in the higher-priority location. Set `hideBundledAgents: true` in `config.json` to omit all package-bundled agents from `subagents_list` (overrides of those names still appear).
 
 ---
 
@@ -139,9 +149,12 @@ cp config.json.example config.json
 {
   "status": {
     "enabled": true
-  }
+  },
+  "hideBundledAgents": false
 }
 ```
+
+`hideBundledAgents` defaults to `false`. When `true`, `subagents_list` omits package-bundled agents. Absent config preserves the default.
 
 `config.json` is gitignored so local overrides don't get committed.
 
@@ -177,6 +190,56 @@ subagent({ name: "Designer", agent: "game-designer", cwd: "agents/game-designer"
 | `skills`               | string  | —              | Comma-separated skill names                                                                       |
 | `tools`                | string  | —              | Comma-separated tool names                                                                        |
 | `cwd`                  | string  | —              | Working directory for the sub-agent (see [Role Folders](#role-folders))                           |
+| `routing`              | object  | —              | Optional deterministic `{ taskClass, stage, authorAttemptId? }` routing preflight                  |
+
+### Deterministic task routing
+
+When `routing` is present, the extension selects the configured profile and its current model ID before launch. Use `stage: "author"` first. Ordinary code classes then take a separate `stage: "runner"` call (command evidence) and a separate `stage: "checker"` call (semantic verdict), each with the completed `authorAttemptId`. The paired preflight reads the author's observed model from `workers.json`, rejects unknown or same-family pairings (including model overrides), and prefixes the checker task with the source attempt/session identity. It does not automatically schedule the runner or checker or interpret their verdicts. `high-risk-planning` has no runner stage.
+
+```typescript
+subagent({
+  name: "Build",
+  task: "Implement the reviewed change",
+  routing: { taskClass: "general-implementation", stage: "author" },
+});
+
+subagent({
+  name: "Run",
+  task: "Run the agreed checks",
+  routing: {
+    taskClass: "general-implementation",
+    stage: "runner",
+    authorAttemptId: "<completed attempt UUID>",
+  },
+});
+
+subagent({
+  name: "Check",
+  task: "Inspect the actual diff and run the tests",
+  routing: {
+    taskClass: "general-implementation",
+    stage: "checker",
+    authorAttemptId: "<completed attempt UUID>",
+  },
+});
+```
+
+For `complex-alternate` the author is Sol (`implementer-gpt`). The default Luna runner is the same trainer family, so that call is refused; the coordinator must pass `model: "openrouter/z-ai/glm-5.3-flash"` on the runner call:
+
+```typescript
+subagent({
+  name: "Run",
+  task: "Run the agreed checks",
+  model: "openrouter/z-ai/glm-5.3-flash",
+  routing: {
+    taskClass: "complex-alternate",
+    stage: "runner",
+    authorAttemptId: "<completed attempt UUID>",
+  },
+});
+```
+
+Routes: `general-implementation`, `complex-alternate`, `large-context`, `mechanical-bulk`, `surgical`, `economy-fanout` (author `implementer-glm`, checker `verifier`/Opus), `high-risk-planning`, and `tiny-edit`. `tiny-edit` author routing returns `stay_here` with the current coordinator model/family instead of spawning. `tiny-edit` has no automatic `checker` or `runner` route: a stay-here edit never records an author identity, so there is nothing to check against, and `stage: "checker"` / `stage: "runner"` are refused before launch with a clear error. If a tiny-edit needs an independent checker, delegate it as `general-implementation` or `surgical` instead so the author attempt is recorded. The coordinator owns the bounded correction/recheck workflow.
 
 ---
 

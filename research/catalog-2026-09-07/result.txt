@@ -1,0 +1,69 @@
+CATALOG VERIFICATION — FINAL SOURCE-GROUNDED SHORTLIST
+Instance: catalog-verification-sonnet | Model requested: claude-sonnet-5 (medium)
+Actual selected model: claude-sonnet-5 (confirmed via PI_MODEL env var; PI_INSTANCE unset — unknown, not guessed)
+Scope: read-only research/verification of the three Haiku lane reports. NOT security certification, NOT implementation approval.
+
+ANSWER-FIRST MATRIX
+
+REUSE NOW (proven-compatible, safe to adopt for stated capability, no install performed here):
+1. @narumitw/pi-sync 0.50.0 — peerDeps @earendil-works/pi-coding-agent "*" / pi-tui "*" (npm registry, proven) → compatible with installed Pi 0.85.1. Repo: github.com/narumiruna/pi-extensions (dir packages/pi-sync — org spelled "narumiruna", npm scope "@narumitw"; these differ, confirmed from repository.url field, not assumed). License MIT. Fills the documented builtin gap: Pi has no native settings/session backup or multi-device sync (confirmed from packages.md, read in full). Replaces custom backup code IF external storage (git/S3/R2/WebDAV per prior Haiku claim, NOT independently source-verified here) is acceptable.
+2. @narumitw/pi-stamp 0.50.0 — same peer range "*", same repo family, MIT. Adds per-message footer/timestamp metadata. Reuse for minimal session identity display, but do NOT assume it satisfies "full untruncated UUID in footer" — that specific claim was NOT verified from source in this pass (registry metadata only fetched, README body not fully read).
+3. pi-powerline-footer 0.17.0 (nicobailon) — peerDeps >=0.81.0 (no upper bound) on pi-ai/pi-tui/pi-coding-agent, MIT, npm-registry-proven. Likely compatible with 0.85.1 (no explicit exclusion found), alternative footer style. Same caveat: full-UUID display not source-verified.
+4. Builtin Pi package pinning/update (docs-proven, read in full at /opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/docs/packages.md): `pi install npm:pkg@X.Y.Z` pins and is skipped by `pi update --extensions`/`--all`; git refs pinned and reconciled but not auto-advanced; `pi update --self` updates only the Pi CLI via a separate staged/lockfile release path, distinct from package state. This is a real, documented separation between core-CLI upgrades and package state — it is NOT the same as a proven guarantee that "upgrades never erase customizations" for every scenario (e.g., no built-in pre/post upgrade diff or local-only backup exists, confirmed absent from docs). Treat as PROVEN for the specific mechanics quoted, UNVERIFIED for the broader non-erasure claim.
+
+INVESTIGATE NEXT (compatible or plausible, but source/behavior not yet read deeply enough to adopt):
+5. @tintinweb/pi-subagents 0.19.0 — peerDeps @earendil-works/{pi-ai,pi-coding-agent,pi-tui} >=0.84.0 (npm registry, proven) → compatible with 0.85.1 (floor only, no ceiling; future Pi majors could still break it — monitor). Repo github.com/tintinweb/pi-subagents exists; npm-bundled README is present and substantial (~64KB before registry truncation). This CONTRADICTS the orchestration-lane Haiku's claim of a GitHub README 404 — that claim is unsupported by the evidence gathered here (I did not independently re-fetch the raw GitHub README to triple-confirm branch/path, so I correct the record to "unverified 404" rather than asserting the opposite as proven). Steering/FleetView/resume claims are README-only, not source-inspected in this pass — do not adopt without reading actual source for the same categories requested (generated shell metadata, split flags, non-Pi CLI lanes, cleanup/takeover, completion validation).
+6. pi-subagents 0.66.0 (maintainer: Nico Bailon / nicobailon, confirmed both via npm registry author field AND live catalog package page https://pi.dev/packages/pi-subagents?type=extension) — this DIRECTLY CONTRADICTS the orchestration-lane Haiku's claim that "package lookup failed on latest npm registry" / "not found." That claim is factually wrong; the package is live, versioned, and catalog-listed. peerDeps: @earendil-works/pi-ai >=0.80.0, pi-tui/pi-agent-core/pi-coding-agent "*" — broadly compatible with 0.85.1. Not yet source-inspected for capability fit; needs README/source read before recommending.
+
+REJECT FOR THIS REQUIREMENT (now, on current evidence):
+7. @maplezzk/pi-interactive-subagents — latest is 3.12.0 (npm registry, published 2026-09-04), NOT 3.7.1 as the fresh Haiku report stated. peerDependencies pin @earendil-works/pi-coding-agent and pi-tui to ">=0.80.0 <0.81.0" (npm registry, verbatim) — this EXCLUDES installed Pi 0.85.1. Both Haiku reports' compatibility claims ("Pi >=0.85", "no legacy imports detected") are unsupported by the actual peerDependencies field and are corrected here. Separately, and more importantly: the package's own bundled README (npm registry readme field, Chinese, read in full) states verbatim it is a fork of HazAT/pi-interactive-subagents ("本包 fork 自 HazAT/pi-interactive-subagents（MIT 协议）。设计与实现的版权归原作者 HazAT 所有") and that this fork's only changes are "monorepo 集成与 scoped npm 发布" (monorepo integration and scoped npm publishing) — i.e., the fork does not claim to have fixed the original HazAT design/security issues named in the brief (generated-comment injection, Claude --dangerously-skip-permissions lane, destructive watcher cleanup, takeover/completion weaknesses). Per instructions, these must NOT be assumed fixed absent evidence, and none was found. The full GitHub README (raw.githubusercontent.com/maplezzk/pi-extensions/main/packages/pi-interactive-subagents/README.md, fetched live, 518 lines) does advertise "Subagent panes are created without stealing keyboard focus (cmux, tmux)" (line 89) — directly relevant to the Orca acceptance-gate blocker — but this is an ADVERTISED claim only, not live-tested, scoped explicitly to cmux/tmux (not to Orca's own pane-split behavior, which is the actual blocked mechanism per the current gate), and moot anyway given the peer-version exclusion. On interrupt (`subagent_interrupt`), the README states the pane/session/background polling deliberately stay alive rather than being torn down — this is the opposite of "destructive watcher cleanup" in that specific path, but does not confirm the original cleanup issue is resolved elsewhere, and completion is still signaled purely by "model stopped normally," not by any verified task-success check — the "weak completion" concern from the original brief appears structurally unaddressed. REJECT for this requirement until (a) peerDependencies cover 0.85.x and (b) an independent source review (not performed here) confirms the inherited HazAT issues are fixed.
+8. pi-background-tasks 2.5.0 — peerDependencies "@earendil-works/pi-coding-agent": "^0.81.1 || ^0.82.1 || ^0.83.0 || ^0.84.0" (npm registry, verbatim). Caret ranges on 0.x versions only permit patch bumps, so none of these ranges include 0.85.1 — INCOMPATIBLE with the installed Pi version right now. The recovery-lane Haiku's characterization ("Built into latest Pi") is unsupported by this evidence and is corrected.
+
+CATALOG EVIDENCE (https://pi.dev/packages?type=extension)
+The catalog's default listing IS server-rendered (data-package-name/-search attributes present directly in the fetched HTML, ~208KB, 50 cards shown by default — not a client-only shell, so no separate JS/data-feed inspection was needed). The `?q=` query parameter redirects (HTTP 302) back to the plain listing — search is evidently client-side JS filtering over an already-loaded card set, not a server query route; I did not invent an API route to work around this. Direct package detail pages at `/packages/<name>?type=extension` return HTTP 200 and were used instead to confirm listing for @tintinweb/pi-subagents, pi-subagents (nicobailon), and @maplezzk/pi-interactive-subagents, @narumitw/pi-sync.
+
+CORRECTIONS TO PRIOR HAIKU REPORTS (explicit)
+- @maplezzk/pi-interactive-subagents: actual version 3.12.0, not 3.7.1; peer range >=0.80.0 <0.81.0, not ">=0.85"/"modern @earendil-works ... no legacy imports" — WRONG in fresh report.
+- pi-subagents (nicobailon): package EXISTS at 0.66.0 — the orchestration-lane "lookup failed... appears unmaintained" claim is WRONG.
+- pi-background-tasks: peer ranges exclude 0.85.1 — the "Built into latest Pi" framing is WRONG/overstated.
+- @tintinweb/pi-subagents: README is present and substantial via npm registry — the "GitHub README 404" claim is unsupported by evidence gathered (corrected to unverified, not proven-false, since raw GitHub path wasn't independently re-checked).
+- No package inspected here provides Orca-specific (as opposed to raw tmux/cmux) no-focus-split proof; that remains the acceptance-gate blocker regardless of extension choice.
+
+WHAT CUSTOM WORK CAN BE DROPPED VS RETAINED
+Drop: custom settings/session backup-restore code (pi-sync fits, pending external-storage acceptance), custom footer/timestamp identity scaffolding (pi-stamp / pi-powerline-footer fit for basic display), custom package-pinning/version-lock logic (builtin `pi install`/`pi update --extensions` already does this, docs-proven).
+Retain/build custom: (1) the Orca-tab no-focus-change tmux launcher itself — no catalog extension found, including the leading maplezzk candidate, documents or proves this specifically for Orca's pane-split behavior; (2) Pi-only model-family dispatch/classification logic — no extension found does task-to-model-class routing (and per coordinator note, no LiteLLM/proxy is needed since native Pi already supports the needed providers); (3) exact session-UUID propagation to workers and owned-cleanup/crash-recovery bookkeeping across parent reloads — not addressed by any inspected package.
+
+SHOULD THE LOCAL HazAT FORK (3.7.2-mbp.1) REMAIN PAUSED?
+Yes. The closest catalog analog (@maplezzk/pi-interactive-subagents) is itself a fork of the same upstream HazAT codebase, is currently peer-incompatible with installed Pi 0.85.1, and its own documentation claims no design/security fixes beyond packaging — so neither upstream nor this fork provides evidence that the original reproduced issues (generated-comment injection, --dangerously-skip-permissions lane, destructive watcher cleanup, takeover/completion weaknesses) are resolved. There is no basis here to resume local development or to treat the maplezzk fork as a validated replacement.
+
+SOURCES CHECKED (16 live HTTP GETs; budget 28)
+1. https://pi.dev/packages?type=extension (200, catalog HTML)
+2. https://registry.npmjs.org/@maplezzk/pi-interactive-subagents (200)
+3. https://registry.npmjs.org/@tintinweb/pi-subagents (200)
+4. https://registry.npmjs.org/pi-subagents (200)
+5. https://registry.npmjs.org/pi-background-tasks (200)
+6. https://registry.npmjs.org/@narumitw/pi-sync (200)
+7. https://registry.npmjs.org/@narumitw/pi-stamp (200)
+8. https://registry.npmjs.org/pi-powerline-footer (200)
+9-11. https://pi.dev/packages?type=extension&q={maplezzk,pi-sync,pi-subagents} (302 each — search redirects, documented as blocker/workaround above, not treated as failure)
+12. https://pi.dev/packages/@maplezzk/pi-interactive-subagents?type=extension (200)
+13. https://pi.dev/packages/pi-subagents?type=extension (200)
+14. https://pi.dev/packages/@narumitw/pi-sync?type=extension (200)
+15. https://raw.githubusercontent.com/maplezzk/pi-extensions/main/packages/pi-interactive-subagents/README.md (200, full 518-line README read)
+16. https://registry.npmjs.org/pi-terminal-mux (200, dependency of maplezzk package; confirms abstracted multiplexer API incl. tmux/cmux/zellij/wezterm/herdr/otty/orca backend detection, no raw tmux split-window flags exposed in README)
+Plus: full local read of /opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/docs/packages.md (packaging/pinning mechanics, cited above).
+
+LABELS: PROVEN = confirmed via npm registry JSON / live HTTP 200 fetch / official docs file. INFERRED = stated in a project README without independent source-code read. UNVERIFIED = neither confirmed nor refuted here; live testing not authorized in this lane.
+
+BLOCKERS
+- Catalog search parameter (`?q=`) does not return server-filtered results (302 redirect); worked around via direct package-slug URLs, not invented API routes.
+- No live testing authorized; all tmux/Orca focus-preservation and cleanup/completion claims for every candidate remain README-level (INFERRED), not validated in a running session.
+- Did not have budget/scope to read tintinweb or nicobailon pi-subagents source in the depth given to maplezzk; their INVESTIGATE-NEXT status reflects that gap, not a negative finding.
+
+CHECKS / EXIT CODES
+All curl calls exited 0; HTTP statuses recorded above (200 for all substantive fetches, 302 for the three search-query probes). No installs, no execution of downloaded code, no config/session writes performed.
+
+LESSON
+Bounded, fast (Haiku-tier) discovery produced at least two verifiably wrong "PROVEN" facts in this run — a fabricated version/peer-range for @maplezzk/pi-interactive-subagents and a false "not found" for the nicobailon pi-subagents package — demonstrating that label strength asserted during rapid triage must be re-validated against live registry/catalog metadata before it is trusted for architecture or reuse decisions.
+
+Artifacts preserved under /tmp/pi-catalog-swarm/verification/: cat.html, npm_*.json (7 packages), pkg_*.html (3 detail pages), src/maplezzk_full_readme.md, src/maplezzk_readme_head.txt.

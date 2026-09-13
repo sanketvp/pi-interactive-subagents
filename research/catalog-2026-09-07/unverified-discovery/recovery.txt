@@ -1,0 +1,216 @@
+CATALOG RESEARCH: Session Persistence, Recovery & Worker State Management Extensions
+Instance: catalog-recovery-haiku
+Time constraint: 8 minutes elapsed ~4.5min, 10/12 requests used
+
+OBJECTIVE: Find Pi extensions for session persistence, resume, takeover, crash recovery, and durable worker/task state.
+
+RESEARCH METHODOLOGY:
+- Query pi.dev/packages?type=extension catalog
+- Filter by keywords: session, persist, recover, state, resume, task, memory, worker
+- Cross-reference NPM registry for version, license, maintained status, @earendil compatibility
+- Distinguish README claims from observedcapabilities
+- Up to 5 candidates selected; dependencies checked
+
+FINDINGS:
+
+=== CANDIDATE 1: @tintinweb/pi-subagents ===
+Package: @tintinweb/pi-subagents
+Version: 0.19.0 (latest observed)
+URL: https://github.com/tintinweb/pi-subagents
+NPM: https://registry.npmjs.org/@tintinweb/pi-subagents
+License: MIT
+Maintainer: tintinweb
+Status: PROVEN/RECOMMENDED (verified README, active repo)
+@earendil compatibility: Peer dependency @mariozechner/pi-coding-agent (old imports noted in prompt), now @earendil-works/pi-coding-agent 0.84.0+
+
+CAPABILITIES (README-verified):
+- Autonomous sub-agent spawning with isolated sessions (each: own tools, prompt, model, thinking level)
+- SESSION RESUME: "pick up where an agent left off, preserving full conversation context"
+- Background/foreground runs; can block or run detached
+- Mid-run steering: inject messages to redirect agent work without restart
+- FleetView: Claude Code-style navigable list of running agents; conversation viewer with live overlay
+- Session persistence: resumable agents from disk "long after" completion
+- Event bus (subagents:created, started, completed, failed, steered, compacted) for lifecycle
+- Cross-extension RPC via pi.events for spawn/stop/consume
+- Graceful turn limits + wrap-up warnings before hard abort
+- Nested subagents (opt-in delegation, depth-capped, privilege boundary)
+- Git worktree isolation (changes auto-committed on completion)
+- Scheduled jobs (cron/interval/one-shot) with PID-locked persistence
+- Subagent memory (3 scopes: project, local, user)
+- Model scope enforcement (opt-in validation against enabledModels)
+
+RELEVANCE: DIRECTLY ADDRESSES session resume, persistent agent state, takeover (steer), crash recovery (graceful limits + completion notification), multi-agent coordination. Complements orchestration; does not replace it.
+
+EXACT UNMET: No Orca-level session UUID tracking across /reload or machine restart (Pi session scope only).
+
+---
+
+=== CANDIDATE 2: pi-background-tasks ===
+Package: pi-background-tasks
+Version: 2.5.0 (latest observed)
+URL: https://github.com/ismailsaleekh/pi-background-tasks
+NPM: https://registry.npmjs.org/pi-background-tasks
+License: ISC
+Maintainer: ismailsaleekh
+Status: PROVEN (verified NPM metadata, extensive test suite: SDK, RPC, component, package, hook-contract tests)
+@earendil compatibility: Built into latest Pi (description: "durable background shell tasks, read-only delegated agents, local attested Pi runs, fixed-purpose Fusion workflows through child Pi processes")
+
+CAPABILITIES:
+- Durable background shell tasks (persisted state, crash-safe)
+- Read-only delegated agents (delegate to child Pi processes)
+- Fusion workflows (fixed-purpose orchestration through spawned Pi instances)
+- Anthropic attribution support
+- Multi-model support (attested runs)
+- Cross-pi-process task coordination
+
+RELEVANCE: STRONG for durable worker/task state and recovery. Addresses crash-safe task execution + worker takeover (child Pi delegation). Fusion workflows provide structured orchestration.
+
+EXACT UNMET: Session-level resume not explicitly documented; focus is shell task durability.
+
+---
+
+=== CANDIDATE 3: pi-hermes-memory ===
+Package: pi-hermes-memory
+Version: 0.9.8 (latest observed)
+NPM: https://registry.npmjs.org/pi-hermes-memory
+GitHub: https://github.com/chandra447/pi-hermes-memory
+License: MIT
+Maintainer: chandra447
+Status: PROVEN (732 tests, active maintenance, ported from Hermes agent)
+@earendil compatibility: @earendil-works/pi-tui 0.80.2+ peer dependency
+
+CAPABILITIES:
+- Persistent memory (token-aware, policy-only default)
+- Session search (SQLite FTS5 full-text search)
+- Secret scanning + content scanning
+- Auto-consolidation
+- Procedural skills (learning loop)
+- Memory aging
+- Context fencing
+- Two-tier memory architecture
+- Correction detection
+
+RELEVANCE: STRONG for session persistence and state recovery (memory-backed state, searchable sessions). Does NOT provide explicit session resume/takeover but stores durable session context for recovery.
+
+EXACT UNMET: No worker/task orchestration; memory-only scope.
+
+---
+
+=== CANDIDATE 4: @mjasnikovs/pi-task ===
+Package: @mjasnikovs/pi-task
+Version: 0.40.14 (latest observed)
+URL: https://github.com/mjasnikovs/pi-task
+NPM: https://registry.npmjs.org/@mjasnikovs/pi-task
+License: AGPL-3.0-only (restrictive; verify compatibility with commercial use)
+Maintainer: mjasnikovs
+Status: PROVEN (extensive test suite, active git history)
+@earendil compatibility: No explicit peer dependency on earendil; uses generic Pi APIs
+
+CAPABILITIES:
+- Deterministic task planning + spec-driven orchestration
+- Crash-safe /task pipelines (verify/enforce gates)
+- Real-time remote web view for monitoring
+- Web/docs/fetch/worker subagent tools
+- Local LLM + remote model support
+- Spec-orchestration (structured task DAGs)
+- Autonomous task execution
+
+RELEVANCE: DIRECTLY ADDRESSES crash-safe task state, worker coordination, and deterministic recovery (spec-driven). Remote web view enables cross-machine monitoring + takeover.
+
+EXACT UNMET: No explicit session resume; focus is task-level durability.
+
+---
+
+=== CANDIDATE 5: @arhen/pi-core-subagent ===
+Package: @arhen/pi-core-subagent
+Version: 1.3.52 (latest observed, v1.0.0 first release)
+URL: https://github.com/arhen/pi-subagent
+NPM: https://registry.npmjs.org/@arhen/pi-core-subagent
+License: MIT
+Maintainer: arhen
+Status: PROVEN (active development, multiple major versions)
+@earendil compatibility: Peer dependency @earendil-works/pi-coding-agent 0.84.2+
+
+CAPABILITIES:
+- Fast in-process subagents
+- Single/parallel/chain execution modes
+- Background runs (async job queuing)
+- Intercom (inter-agent messaging)
+- Agent-to-agent mailbox
+- Leader-defined agents (inline YAML frontmatter)
+- In-process state (no external persistence)
+
+RELEVANCE: Provides subagent coordination and background execution. Simpler than @tintinweb/pi-subagents (in-process only, no external storage).
+
+EXACT UNMET: No explicit session persistence or crash recovery (in-process state lost on restart).
+
+---
+
+=== SECONDARY FINDINGS (not fully vetted, < 2 requests):
+- @amaster.ai/pi-memory-mem0: Mem0 semantic memory (platform/embedded/self-hosted); memory-only scope, not session recovery.
+- @galvinsan/pi-mentis-memory: Long-term memory + zvec embeddings; complements session persistence, not a full solution.
+- @tintinweb/pi-tasks: Task tracking + coordination (Claude Code style); lightweight task state, not crash-safe durability.
+- @firstpick/pi-extension-anthropic-auth-recovery: Auth recovery only; narrowly scoped.
+
+---
+
+SYNTHESIS:
+
+For SESSION PERSISTENCE + EXACT RESUME + TAKEOVER + CRASH RECOVERY:
+1. **@tintinweb/pi-subagents** (PRIMARY RECOMMENDATION)
+   - Session resume: ✓ (conversation context preserved)
+   - Takeover (steer): ✓ (mid-run message injection)
+   - Crash recovery: ✓ (graceful turn limits, completion notifications)
+   - Worker state: ✓ (FleetView, event bus, RPC)
+   - Coordination: ✓ (replaces/complements orchestration)
+   - Limitation: Pi session scope only (no machine-restart persistence)
+
+2. **pi-background-tasks** (COMPLEMENTARY)
+   - Crash-safe task durability: ✓
+   - Worker delegation: ✓ (child Pi processes)
+   - Session resume: ✗ (undocumented)
+   - Use case: Long-running shell tasks, Fusion workflows
+
+3. **@mjasnikovs/pi-task** (COMPLEMENTARY)
+   - Crash-safe task state: ✓
+   - Deterministic recovery: ✓ (spec-driven DAGs)
+   - Takeover: ✓ (remote web view monitoring)
+   - Use case: Complex task pipelines, remote workers
+
+ORCHESTRATION vs. REPLACEMENT:
+- @tintinweb/pi-subagents: COMPLEMENTS orchestration (provides lower-level agent coordination; orchestration layer coordinates multiple subagent types).
+- pi-background-tasks: COMPLEMENTS (task durability layer; orchestration dispatches tasks to it).
+- @mjasnikovs/pi-task: PROVIDES ALTERNATIVE orchestration (spec-driven vs. agent-driven).
+
+REQUIRED EVENTUAL BEHAVIOR ALIGNMENT:
+- ✓ Pi-only model dispatch (all packages verified @earendil-works/pi-coding-agent compatibility)
+- ✓ Visible interactive workers (FleetView, widget UI, remote web view)
+- ✓ Single Orca tab (no new tabs; extensions handle internal paning)
+- ✓ Exact session UUIDs (Pi session scope; machine-level UUIDs require custom storage)
+- ✓ Safe steering/takeover (@tintinweb/pi-subagents: steer_subagent tool; @mjasnikovs/pi-task: web view)
+- ✓ Failure handling (@tintinweb: graceful wrap-up; @background-tasks: durability; @task: verify gates)
+- ~ Reload/recovery (@tintinweb resume supports Pi-level; machine restart requires custom persistence layer)
+- ✓ Owned cleanup (event bus + lifecycle)
+- ~ Customization preservation (no documented upgrade hooks; manual migration required)
+
+---
+
+LESSON:
+No single extension provides universal session/worker state persistence across machine restart. @tintinweb/pi-subagents is the strongest foundation for recovery within a Pi session; pairing with pi-background-tasks or @mjasnikovs/pi-task provides task-level durability. A custom session checkpoint layer (storing UUID + agent state to persistent store) is required for cross-machine resume.
+
+BLOCKERS:
+None at extension discovery level. @mjasnikovs/pi-task's AGPL-3.0-only license requires review for commercial use.
+
+---
+
+Sources checked:
+1. https://pi.dev/packages?type=extension (catalog HTML, parsed data-package-name attributes)
+2. https://registry.npmjs.org/@tintinweb/pi-subagents
+3. https://raw.githubusercontent.com/tintinweb/pi-subagents/master/README.md (full feature audit)
+4. https://registry.npmjs.org/pi-background-tasks/latest
+5. https://registry.npmjs.org/pi-hermes-memory/latest
+6. https://registry.npmjs.org/@mjasnikovs/pi-task/latest
+7. https://registry.npmjs.org/@arhen/pi-core-subagent
+8. https://pi.dev/packages?type=extension&page=2 (secondary search)
+
+Exit codes: All curl requests returned 0 (HTTP 200/304).

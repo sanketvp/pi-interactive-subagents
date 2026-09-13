@@ -1,11 +1,5 @@
 {
-  "packages": [
-    {
-      "source": "git:github.com/HazAT/pi-interactive-subagents",
-      "extensions": [],
-      "skills": []
-    }
-  ],
+  "packages": [],
   "extensions": [
     "../pi-extension/subagents/index.ts"
   ],

@@ -1,0 +1,96 @@
+{
+  "scope": "Research only; no package installation, rollout, or full swarm acceptance",
+  "invocations": 5,
+  "budget": 12,
+  "models": {
+    "discovery": "claude-haiku-4-5",
+    "verification": "claude-sonnet-5"
+  },
+  "authority": "ODV coordinator report; raw agent reports contain corrected/unsupported claims",
+  "files": [
+    {
+      "path": "archive-sha256.json",
+      "sha256": "c6d585e4dbb36d21effb4c46bbd2b7ee4868fdf9199ebe1fe36204c912009abc"
+    },
+    {
+      "path": "archives/pisubagents-0.66.0.tgz",
+      "sha256": "d4caacf07519bae2be40ee684b55e04c11f58d5542ffc086483adbbdb8ed264e"
+    },
+    {
+      "path": "archives/pisync-0.50.0.tgz",
+      "sha256": "aa6d2dd7d7a3f6bd47c12f6d7749999ed993ee2786b02e2751fcace76be62722"
+    },
+    {
+      "path": "archives/terminalmux-0.4.1.tgz",
+      "sha256": "0434db1e82c36d6e2cbefc799e79e636d31388ff45da2ad576a6c29f64aabcc3"
+    },
+    {
+      "path": "archives/tintinweb-0.19.0.tgz",
+      "sha256": "0c4c9416750027f5e18aef663975827ecc63bd4969a207c3dd0abde7e6bd61de"
+    },
+    {
+      "path": "npm_bgtasks.json",
+      "sha256": "b29b7067596f0f99ee7f792c90dc4d477ff0ef86878d4d8d5fede04b2e9ea8fa"
+    },
+    {
+      "path": "npm_maplezzk.json",
+      "sha256": "e11b4ec275fb3dfdfd23100c58345d19b99a3e0d8b7904e215fb38f0e8135983"
+    },
+    {
+      "path": "npm_pistamp.json",
+      "sha256": "e8c589ebdcfe4e0bbd9776b40f2797d962f4d88c21d1b4ad501001d8f3ec442f"
+    },
+    {
+      "path": "npm_pisubagents.json",
+      "sha256": "14683077572288dd588b01e094b31e6e92389832cc97129ee80e216f19f9349d"
+    },
+    {
+      "path": "npm_pisync.json",
+      "sha256": "4c5ccfad1cbfcd1b9263a2dd0fc6131ba381275396beb1e57d9bc236a89d3bab"
+    },
+    {
+      "path": "npm_powerline.json",
+      "sha256": "52745b0cca85dea2b63ab499ac6da6dd7a99b158c428de94e56f76f01311ceae"
+    },
+    {
+      "path": "npm_terminalmux.json",
+      "sha256": "3cadf6e3b461b4cd52569863700bad91b38565c904c239644cbeeef65fc8055d"
+    },
+    {
+      "path": "npm_tintinweb.json",
+      "sha256": "acb0ac65ec8546850f75033848fcf854f34aa9773d1f608604f7b1c16c248869"
+    },
+    {
+      "path": "result-source.txt",
+      "sha256": "56a9b8d37f24570e3a1dea27ad09000eaa59019271771ab765c39422629836b9"
+    },
+    {
+      "path": "result.txt",
+      "sha256": "abf1587f0d63bcad2c4d22c5ff923597ce100f9c891c3a6ea59ade13ad98532b"
+    },
+    {
+      "path": "source-evidence/detection.ts",
+      "sha256": "57d3a08279c5c0afb4021c81144cf02b15db20a5e182ca04c6a28a9a0727d8fe"
+    },
+    {
+      "path": "source-evidence/headless.ts",
+      "sha256": "2b3abfdc063ca9bcf373fc1e5ce17309093356eb21645b5c24aef5c12435dcf8"
+    },
+    {
+      "path": "source-evidence/tmux.ts",
+      "sha256": "71ffb8a7bcd7049dd172dcbe80bbfd57d33e0bd37391a1fa653112c509a08c6c"
+    },
+    {
+      "path": "unverified-discovery/orchestration.txt",
+      "sha256": "03a838d57e9b03dc77a950fbe8254a2b126b313123bd2d65d1d5e9791739ba1e"
+    },
+    {
+      "path": "unverified-discovery/recovery.txt",
+      "sha256": "a0177bd2ee94e8c2f7c6658fccf938e1590ec302614d48cb58ce2af9366c2224"
+    },
+    {
+      "path": "unverified-discovery/upgrades.txt",
+      "sha256": "ee009fa955fff2cf4dd21a8b28c59ee0fdcf66b9139ed61b3fcc09381b6dd40d"
+    }
+  ]
+}

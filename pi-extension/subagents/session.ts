@@ -178,3 +178,20 @@ export function mergeNewEntries(
   }
   return entries;
 }
+
+/** Text of the most recent tool result (excluding subagent_done's own ack), for models that finish without prose. */
+export function findLastToolResultText(entries: SessionEntry[]): string | null {
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const entry = entries[i];
+    if (entry.type !== "message") continue;
+    const msg = (entry as MessageEntry).message as { role?: string; toolName?: string; content?: any[] };
+    if (msg.role !== "toolResult" || msg.toolName === "subagent_done") continue;
+    const text = (msg.content ?? [])
+      .filter((b) => b?.type === "text" && typeof b.text === "string")
+      .map((b) => b.text as string)
+      .join("\n")
+      .trim();
+    if (text) return text.length > 4000 ? text.slice(0, 4000) + "\n…(truncated)" : text;
+  }
+  return null;
+}

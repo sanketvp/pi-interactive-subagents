@@ -4,6 +4,9 @@ import { existsSync, readFileSync, rmSync, writeFileSync, mkdirSync, statSync } 
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 
+import { safeScriptPreamble } from "./hardening.ts";
+import { validateCompletion } from "./completion.mjs";
+
 const execFileAsync = promisify(execFile);
 
 export type MuxBackend = "cmux" | "tmux" | "zellij" | "wezterm";
@@ -838,7 +841,7 @@ export function createSurfaceSplit(
     }
     args.push("-P", "-F", "#{pane_id}");
 
-    const pane = execFileSync("tmux", args, { encoding: "utf8" }).trim();
+    const pane = execFileSync("tmux", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
     if (!pane.startsWith("%")) {
       throw new Error(`Unexpected tmux split-window output: ${pane}`);
     }
@@ -927,8 +930,9 @@ export function renameCurrentTab(title: string): void {
     if (!paneId) throw new Error("TMUX_PANE not set");
     const windowId = execFileSync("tmux", ["display-message", "-p", "-t", paneId, "#{window_id}"], {
       encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
     }).trim();
-    execFileSync("tmux", ["rename-window", "-t", windowId, title], { encoding: "utf8" });
+    execFileSync("tmux", ["rename-window", "-t", windowId, title], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
     return;
   }
 
@@ -979,7 +983,7 @@ export function renameWorkspace(title: string): void {
         encoding: "utf8",
       },
     ).trim();
-    execFileSync("tmux", ["rename-session", "-t", sessionId, title], { encoding: "utf8" });
+    execFileSync("tmux", ["rename-session", "-t", sessionId, title], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
     return;
   }
 
@@ -1019,8 +1023,8 @@ export function sendCommand(surface: string, command: string): void {
   }
 
   if (backend === "tmux") {
-    execFileSync("tmux", ["send-keys", "-t", surface, "-l", command], { encoding: "utf8" });
-    execFileSync("tmux", ["send-keys", "-t", surface, "Enter"], { encoding: "utf8" });
+    execFileSync("tmux", ["send-keys", "-t", surface, "-l", command], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+    execFileSync("tmux", ["send-keys", "-t", surface, "Enter"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
     return;
   }
 
@@ -1049,7 +1053,7 @@ export function sendEscape(surface: string): void {
   }
 
   if (backend === "tmux") {
-    execFileSync("tmux", ["send-keys", "-t", surface, "Escape"], { encoding: "utf8" });
+    execFileSync("tmux", ["send-keys", "-t", surface, "Escape"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
     return;
   }
 
@@ -1090,12 +1094,13 @@ export function sendLongCommand(
 
   const scriptParts = ["#!/bin/bash"];
   if (options?.scriptPreamble) {
-    scriptParts.push(options.scriptPreamble.trimEnd());
+    scriptParts.push(safeScriptPreamble(options.scriptPreamble));
   }
   scriptParts.push(command);
 
   writeFileSync(scriptPath, scriptParts.join("\n") + "\n", {
-    mode: 0o755,
+    mode: 0o600,
+    flag: "wx", // Never follow/overwrite a pre-existing launch script or symlink.
   });
   sendCommand(surface, `bash ${shellEscape(scriptPath)}`);
   return scriptPath;
@@ -1190,8 +1195,18 @@ export async function readScreenAsync(surface: string, lines = 50): Promise<stri
 /**
  * Close a pane.
  */
-export function closeSurface(surface: string): void {
+export function claimSurface(surface: string, token: string): void {
+  if (requireMuxBackend() !== "tmux" || !/^%\d+$/.test(surface)) throw new Error("Expected exact tmux worker pane");
+  execFileSync("tmux", ["set-option", "-p", "-t", surface, "@pi-worker-token", token], { stdio: ["ignore", "pipe", "pipe"] });
+}
+
+export function closeSurface(surface: string, expectedToken?: string): void {
   const backend = requireMuxBackend();
+  if (expectedToken) {
+    if (backend !== "tmux") throw new Error("Owned cleanup requires tmux");
+    const actual = execFileSync("tmux", ["show-options", "-p", "-v", "-t", surface, "@pi-worker-token"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+    if (actual !== expectedToken) throw new Error("Worker pane ownership changed; retaining pane");
+  }
 
   if (backend === "cmux") {
     execSync(`cmux close-surface --surface ${shellEscape(surface)}`, {
@@ -1201,7 +1216,7 @@ export function closeSurface(surface: string): void {
   }
 
   if (backend === "tmux") {
-    execFileSync("tmux", ["kill-pane", "-t", surface], { encoding: "utf8" });
+    execFileSync("tmux", ["kill-pane", "-t", surface], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
     return;
   }
 
@@ -1232,6 +1247,12 @@ export interface PollResult {
  * paths in pollForExit decode the payload the same way.
  */
 function interpretExitSidecar(data: any): PollResult {
+  if (!data || !["done", "ping", "error"].includes(data.type)) {
+    throw new Error("Invalid subagent completion payload");
+  }
+  if (data.type === "ping" && (typeof data.name !== "string" || typeof data.message !== "string")) {
+    throw new Error("Invalid subagent ping payload");
+  }
   if (data?.type === "ping") {
     return {
       reason: "ping",
@@ -1261,6 +1282,8 @@ export async function pollForExit(
   signal: AbortSignal,
   options: {
     interval: number;
+    completionFile?: string;
+    identity?: { attemptId?: string; workerId?: string; token: string; sessionFile: string; piSessionId?: string };
     sessionFile?: string;
     sentinelFile?: string;
     onTick?: (elapsed: number) => void;
@@ -1273,7 +1296,20 @@ export async function pollForExit(
       throw new Error("Aborted while waiting for subagent to finish");
     }
 
-    // Fast path: check for .exit sidecar file (written by subagent_done / caller_ping)
+    if (options.completionFile) {
+      try {
+        const data = JSON.parse(readFileSync(options.completionFile, "utf8"));
+        validateCompletion(data, options.identity);
+        return interpretExitSidecar(data);
+      } catch (error: any) {
+        if (error.code !== "ENOENT") throw error;
+      }
+      options.onTick?.(Math.floor((Date.now() - start) / 1000));
+      await new Promise<void>((resolve) => setTimeout(resolve, options.interval));
+      continue; // Never accept terminal text or legacy sidecars for new attempts.
+    }
+
+    // Compatibility path for legacy callers, not used by new fork launches.
     if (options.sessionFile) {
       try {
         const exitFile = `${options.sessionFile}.exit`;

@@ -1,0 +1,246 @@
+{
+  "schema_version": 1,
+  "diagram_type": "lifecycle",
+  "meta": {
+    "title": "Pi Worker Attempt: Resource States vs Outcome Channel",
+    "output": "worker-attempt-v3-lifecycle.html",
+    "viewBox": [
+      980,
+      660
+    ],
+    "quality_profile": "showcase"
+  },
+  "lanes": [
+    {
+      "id": "main",
+      "label": "Resource lifecycle (durable registry)"
+    },
+    {
+      "id": "retained",
+      "label": "Retained states + outcome side channel"
+    },
+    {
+      "id": "terminal",
+      "label": "Slot freed / independent verification"
+    }
+  ],
+  "states": [
+    {
+      "id": "preparing",
+      "type": "start",
+      "label": "Preparing",
+      "sublabel": "intent + budget persisted",
+      "lane": "main",
+      "col": 0,
+      "step": "01",
+      "tag": "atomic"
+    },
+    {
+      "id": "split-requested",
+      "type": "active",
+      "label": "Split Requested",
+      "sublabel": "durable before tmux",
+      "lane": "main",
+      "col": 1,
+      "step": "02",
+      "tag": "pre-effect"
+    },
+    {
+      "id": "launching",
+      "type": "active",
+      "label": "Launching",
+      "sublabel": "unique script = identity",
+      "lane": "main",
+      "col": 2,
+      "step": "03",
+      "tag": "start cmd"
+    },
+    {
+      "id": "running",
+      "type": "active",
+      "label": "Running",
+      "sublabel": "startup receipt",
+      "lane": "main",
+      "col": 3,
+      "step": "04",
+      "tag": "receipt"
+    },
+    {
+      "id": "closed",
+      "type": "success",
+      "label": "Closed",
+      "sublabel": "token + exit receipt",
+      "lane": "main",
+      "col": 4,
+      "step": "05",
+      "tag": "auto-close"
+    },
+    {
+      "id": "unknown",
+      "type": "waiting",
+      "label": "Unknown",
+      "sublabel": "no tag is not failed",
+      "lane": "retained",
+      "col": 0,
+      "tag": "kept"
+    },
+    {
+      "id": "taken-over",
+      "type": "waiting",
+      "label": "Taken Over",
+      "sublabel": "user owns pane",
+      "lane": "retained",
+      "col": 1,
+      "tag": "counted"
+    },
+    {
+      "id": "outcome",
+      "type": "external",
+      "label": "Outcome + Outbox",
+      "sublabel": "done/ping/error",
+      "lane": "retained",
+      "col": 2,
+      "tag": "side channel"
+    },
+    {
+      "id": "foreign",
+      "type": "waiting",
+      "label": "Foreign Socket",
+      "lane": "retained",
+      "col": 0,
+      "yOffset": 90,
+      "height": 36
+    },
+    {
+      "id": "proven-absent",
+      "type": "failure",
+      "label": "Proven Absent",
+      "sublabel": "exact inspection only",
+      "lane": "terminal",
+      "col": 0,
+      "tag": "freed"
+    },
+    {
+      "id": "released",
+      "type": "neutral",
+      "label": "Released",
+      "sublabel": "explicit user relinquish",
+      "lane": "terminal",
+      "col": 1,
+      "tag": "freed"
+    },
+    {
+      "id": "verified",
+      "type": "success",
+      "label": "Verified",
+      "sublabel": "independent evidence",
+      "lane": "terminal",
+      "col": 2,
+      "tag": "separate"
+    }
+  ],
+  "transitions": [
+    {
+      "id": "launching-unknown",
+      "from": "launching",
+      "to": "unknown",
+      "label": "tags missing: kept",
+      "route": "drop"
+    },
+    {
+      "id": "running-taken-over",
+      "from": "running",
+      "to": "taken-over",
+      "label": "user takeover",
+      "route": "drop"
+    },
+    {
+      "id": "unknown-running",
+      "from": "unknown",
+      "to": "running",
+      "label": "adopt by start command",
+      "variant": "emphasis",
+      "labelDy": 24
+    },
+    {
+      "id": "unknown-foreign",
+      "from": "unknown",
+      "to": "foreign",
+      "label": "other-socket record",
+      "route": "drop",
+      "labelAt": [
+        402,
+        350
+      ]
+    },
+    {
+      "id": "running-outcome",
+      "from": "running",
+      "to": "outcome",
+      "label": "writes outcome",
+      "variant": "dashed",
+      "labelDy": 24
+    },
+    {
+      "id": "outcome-closed",
+      "from": "outcome",
+      "to": "closed",
+      "label": "gates auto-close",
+      "variant": "dashed"
+    },
+    {
+      "id": "outcome-verified",
+      "from": "outcome",
+      "to": "verified",
+      "label": "independent check",
+      "variant": "dashed",
+      "route": "drop"
+    },
+    {
+      "id": "taken-over-released",
+      "from": "taken-over",
+      "to": "released",
+      "label": "two UI confirms",
+      "variant": "security",
+      "route": "drop"
+    },
+    {
+      "id": "foreign-absent",
+      "from": "foreign",
+      "to": "proven-absent",
+      "label": "exact inspection",
+      "route": "drop"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Creation-Time Identity",
+      "items": [
+        "Preparing and Split Requested persist before any tmux effect; the invocation budget commits in the same atomic write",
+        "The pane starts the unique recorded script: pane_start_command is the primary identity, bootstrap tags are secondary",
+        "Once Split Requested is durable, missing tags alone never mean failed; the record stays Unknown until proven or released"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "Capacity vs Outcome",
+      "items": [
+        "Resource state and outcome are orthogonal; an outcome never frees a slot",
+        "A slot is freed only by exact-token close, exact inspection proving absence, or explicit user relinquishment",
+        "Running, unknown, taken-over, and foreign states all keep counting toward the four-live cap",
+        "Automatic close additionally requires the settled outcome and the post-exit shell receipt"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "Delivery Outbox",
+      "items": [
+        "Outcomes persist with delivery pending before send; attempted is persisted after the send",
+        "Automatic delivery is at-most-once; notification loss is possible and stated",
+        "On reload, pending or uncertain outcomes are displayed for explicit replay, never resent automatically",
+        "Task verification stays independent of any reported outcome"
+      ]
+    }
+  ]
+}

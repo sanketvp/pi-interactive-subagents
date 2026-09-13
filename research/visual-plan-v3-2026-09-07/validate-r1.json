@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "ok": false,
+  "command": "validate",
+  "stage": "render",
+  "type": "lifecycle",
+  "input": "/tmp/hazat-review/visual-v3/worker-attempt-v3.lifecycle.json",
+  "error": "Lifecycle layout validation failed:\n- Label \"other-socket record\" overlaps state \"unknown\" — adjust labelDx/labelDy/labelSegment or set labelAt.\n  label rect: [349, 331, 105, 16]\n  state \"unknown\" rect: [339, 278, 126, 58]\n  Suggested fix: labelAt [402, 350] or labelDy +8 (below); or labelAt [402, 274] or labelDy -68 (above)\n- Labels \"tags missing: kept\" and \"adopt by start command\" overlap — adjust labelDx/labelDy.\n  \"tags missing: kept\" [352, 212, 100, 16]; \"adopt by start command\" [421, 211, 120, 16]\n  Suggested fix: add labelDy +24 on one edge, adjust labelDx, or remove one label\n- Labels \"user takeover\" and \"adopt by start command\" overlap — adjust labelDx/labelDy.\n  \"user takeover\" [518, 212, 76, 16]; \"adopt by start command\" [421, 211, 120, 16]\n  Suggested fix: add labelDy +24 on one edge, adjust labelDx, or remove one label\n- Labels \"user takeover\" and \"writes outcome\" overlap — adjust labelDx/labelDy.\n  \"user takeover\" [518, 212, 76, 16]; \"writes outcome\" [591, 211, 81, 16]\n  Suggested fix: add labelDy +24 on one edge, adjust labelDx, or remove one label",
+  "diagnostics": [
+    {
+      "code": "layout/constraint",
+      "severity": "error",
+      "message": "Label \"other-socket record\" overlaps state \"unknown\" — adjust labelDx/labelDy/labelSegment or set labelAt.\n  label rect: [349, 331, 105, 16]\n  state \"unknown\" rect: [339, 278, 126, 58]\n  Suggested fix: labelAt [402, 350] or labelDy +8 (below); or labelAt [402, 274] or labelDy -68 (above)",
+      "subject": {
+        "diagramType": "lifecycle"
+      },
+      "evidence": {},
+      "supportedFixes": []
+    },
+    {
+      "code": "layout/constraint",
+      "severity": "error",
+      "message": "Labels \"tags missing: kept\" and \"adopt by start command\" overlap — adjust labelDx/labelDy.\n  \"tags missing: kept\" [352, 212, 100, 16]; \"adopt by start command\" [421, 211, 120, 16]\n  Suggested fix: add labelDy +24 on one edge, adjust labelDx, or remove one label",
+      "subject": {
+        "diagramType": "lifecycle"
+      },
+      "evidence": {},
+      "supportedFixes": []
+    },
+    {
+      "code": "layout/constraint",
+      "severity": "error",
+      "message": "Labels \"user takeover\" and \"adopt by start command\" overlap — adjust labelDx/labelDy.\n  \"user takeover\" [518, 212, 76, 16]; \"adopt by start command\" [421, 211, 120, 16]\n  Suggested fix: add labelDy +24 on one edge, adjust labelDx, or remove one label",
+      "subject": {
+        "diagramType": "lifecycle"
+      },
+      "evidence": {},
+      "supportedFixes": []
+    },
+    {
+      "code": "layout/constraint",
+      "severity": "error",
+      "message": "Labels \"user takeover\" and \"writes outcome\" overlap — adjust labelDx/labelDy.\n  \"user takeover\" [518, 212, 76, 16]; \"writes outcome\" [591, 211, 81, 16]\n  Suggested fix: add labelDy +24 on one edge, adjust labelDx, or remove one label",
+      "subject": {
+        "diagramType": "lifecycle"
+      },
+      "evidence": {},
+      "supportedFixes": []
+    }
+  ]
+}

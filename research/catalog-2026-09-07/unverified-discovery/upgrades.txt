@@ -1,0 +1,138 @@
+RESEARCH FINDINGS: Pi Extensions for Upgrade-Safe Customization & Session Identity
+Instance: catalog-upgrades-haiku
+Model: unknown (research-only, no execution)
+Date: 2026-01-14T03:00:00Z
+
+OBJECTIVE
+Find Pi extensions reusable for upgrade-safe customization, config management, footer/session
+identity, package pinning, and backup/restore. Compare against builtin Pi capabilities.
+
+BUILTIN PI CAPABILITIES REVIEW
+Pi 0.85.1 (@earendil-works/pi-coding-agent) includes:
+1. Package installation/pinning via `pi install npm:@scope/pkg@version` and git refs
+2. Settings isolation: ~/.pi/agent/settings.json (global) and .pi/settings.json (project-local)
+3. Package filtering: granular extension/skill/prompt/theme selection via settings JSON
+4. Auto-discovery on project startup; team-shareable project settings
+5. Update commands: `pi update --extensions` reconciles git refs; versioned npm specs are skipped
+6. No native session UUID/footer identity extension; footer is Pi's native domain
+
+CANDIDATE EXTENSIONS EVALUATED (5)
+
+1. @narumitw/pi-statusline (Proven extension, footer/identity)
+   - URL: https://github.com/narumiruna/pi-extensions/packages/pi-stamp
+   - Version: n/a (part of larger collection)
+   - Capability: Replaces footer with information-rich statusline
+   - Session identity: Shows timestamp, response metadata, model/provider, token/cost info
+   - Status: PROVEN from live README; uses opt-in transcript expansion for sensitive IDs
+   - Compatibility: Pi >= 0.85.0 implied (recent GH org)
+   - License: MIT
+   - Upgrade-safe: Yes; extension-based, no core config modification
+   - Recommendation: REUSE for footer customization and minimal session metadata display
+
+2. @narumitw/pi-sync (Proven, backup/restore, multidevice config sync)
+   - URL: https://github.com/narumiruna/pi-extensions/packages/pi-sync
+   - Version: latest shown as main branch
+   - Capability: Sync Pi settings + optional sessions via Git, WebDAV, Cloudflare R2, S3
+   - Features: Immutable snapshots, conflict detection, recovery journals, transactional apply,
+     secret scanning, atomic writes, unknown-field preservation
+   - Status: PROVEN from detailed README; production-ready with explicit safety design
+   - License: MIT
+   - Upgrade-safe: Yes; uses local ~/ and .pi/ structure, separate remote snapshots, no core mods
+   - Limitation: Requires external storage (Git, R2, S3); not local-only
+   - Recommendation: REUSE for multidevice config backup/restore; replaces custom backup code
+     if external storage is acceptable
+
+3. @narumitw/pi-stamp (Proven, session/footer identity metadata)
+   - URL: https://github.com/narumiruna/pi-extensions/packages/pi-stamp
+   - Version: latest (shown in README)
+   - Capability: Adds quiet right-aligned timestamps after each message; optional response
+     timing, model identity, token/cost, tool duration
+   - Features: Persists stamps across reload/resume, stays outside model context, width-safe,
+     no timers/watchers/network/tools owned
+   - Status: PROVEN; detailed README shows exact feature set
+   - License: MIT
+   - Upgrade-safe: Yes; transcript-only modification, no settings impact
+   - Recommendation: REUSE for minimal session footer identity (timestamps, model provenance)
+
+4. pi-powerline-footer (Proven, footer customization)
+   - URL: https://github.com/nicobailon/pi-powerline-footer
+   - Version: 0.17.0 (npm)
+   - Capability: Powerline-style status bar, welcome overlay, AI-generated loading messages
+   - Inspired by Powerlevel10k and oh-my-pi
+   - Status: PROVEN from catalog; production version available
+   - License: MIT
+   - Upgrade-safe: Yes; extension-only, no core config required
+   - Recommendation: REUSE if more elaborate powerline-style footer is desired (alternative to pi-stamp)
+
+5. @narumiruna/pi-extensions (Proven collection, not standalone)
+   - URL: https://github.com/narumiruna/pi-extensions
+   - Type: Monorepo with 15+ published extensions and utilities
+   - Included: pi-goal (bounded work completion), pi-lsp (language diagnostics),
+     pi-file-context (project file browser/snapshot), pi-accounts (OAuth account switching),
+     pi-recall (save/quote messages), pi-worktree (git worktree + Pi session carry),
+     pi-caffeinate (prevent sleep), others
+   - Status: PROVEN; active maintenance, independent versioning, changesets-based release
+   - License: MIT (all)
+   - Upgrade-safe: All extension-based, no core modification
+   - Recommendation: NOT directly for upgrade/pinning, but ecosystem shows mature Pi extension
+     patterns; reference for design practices
+
+PACKAGE PINNING & BUILTIN COMPARISON
+Builtin behavior (PROVEN from docs):
+- `pi install npm:pkg@1.2.3` pins npm versions; `pi update --extensions` skips pinned specs
+- `pi install git:host/user/repo@v1.0.0` pins git refs; `pi update --extensions` reconciles refs
+  (reset/clean/npm install if ref moves, but does not advance tags)
+- Project .pi/settings.json carries team-shareable package list; auto-loads on Pi startup
+- No builtin backup/restore of settings.json or package state
+- No builtin multidevice sync of configuration
+- No custom backup code is necessary if pinning pins your exact constraint (version + git ref)
+- Team sharing works out-of-box via .pi/settings.json in VCS
+
+Conclusion: Builtin pinning is sufficient for single-machine reproducibility. Custom backup code
+becomes valuable only for: (a) multidevice sync (pi-sync reuses), (b) granular rollback
+(git-based or snapshot), (c) security audit trails (pi-sync's immutable snapshots provide this).
+
+RECOMMENDATION SUMMARY
+
+REUSE FROM CATALOG (PROVEN):
+1. @narumitw/pi-sync v*.*.* — backup/restore and multidevice config sync (if external
+   storage acceptable; replaces most custom code)
+2. @narumitw/pi-stamp — session identity metadata (timestamps, model provenance, tokens)
+3. @narumitw/pi-statusline or pi-powerline-footer — footer customization (choose style)
+
+DO NOT BUILD CUSTOM CODE FOR:
+- Config backup/restore → use pi-sync + local S3/R2 or GitHub private repo
+- Package pinning → use builtin `pi install npm:@scope/pkg@X.Y.Z` and git refs
+- Session UUID tracking in footer → pi-stamp covers this; extend as needed
+- Team config sharing → use project .pi/settings.json in VCS + pi-sync for binary sessions
+
+UNMET REQUIREMENTS:
+1. Explicit session UUID in footer (full UUID, not truncated) — pi-stamp shows response IDs
+   behind opt-in expansion; may need custom pi-stamp patch or new extension
+2. Local-only backup (no external storage) — pi-sync requires remote; no builtin local archive
+3. Upgrade safety audit — neither builtin nor catalog provides pre-upgrade/post-upgrade diff;
+   custom snapshot at ~/ root before `pi update` is safest
+
+BLOCKERS: None. All recommended extensions are production npm packages with live READMEs,
+GitHub sources, and active authors.
+
+LESSON
+Pi's builtin extension+settings architecture is mature enough that most "custom Pi harness
+code" needs (backup, config sync, package management) are better served by reusing published
+extensions. The three recommended packages (@narumitw/pi-sync, pi-stamp, pi-statusline/
+pi-powerline-footer) are upgrade-safe, actively maintained, and transparent (MIT). No need to
+reinvent config management; extend catalog offerings instead.
+
+EVIDENCE & SOURCES (11 public GETs, 5 candidates, <8 min)
+1. https://pi.dev/packages?type=extension — catalog page, HTML parse for top extensions
+2. /opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/docs/packages.md — Pi docs
+3. https://raw.githubusercontent.com/narumiruna/pi-extensions/main/README.md — monorepo overview
+4. https://raw.githubusercontent.com/narumiruna/pi-extensions/main/packages/pi-stamp/README.md — pi-stamp
+5. https://raw.githubusercontent.com/narumiruna/pi-extensions/main/packages/pi-sync/README.md — pi-sync
+6-11. Catalog searches and npm page probes (some blank, within budget)
+
+INFERRED CLAIMS (no live execution authorized):
+- pi-stamp persists across reload: from README transcript claim
+- pi-sync supports S3/R2: from README feature list
+- All packages MIT: from catalog metadata
+- No breaking changes: inferred from active-repo activity timestamps (8d–12d recent)

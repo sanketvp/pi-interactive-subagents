@@ -1,0 +1,174 @@
+PI EXTENSION CATALOG RESEARCH: TMUX WORKERS & MODEL ROUTING
+Instance: catalog-orchestration-haiku | Lane: orchestration | Environment: Pi 0.85.1, Orca 1.4.197, tmux 3.7c
+Timestamp: 2025-09-07
+
+RESEARCH OBJECTIVE
+Find Pi extensions for interactive tmux worker spawning and model-family routing before building custom Pi harness code. Compare up to 5 best candidates, prioritizing concrete launch/cleanup primitives and modern @earendil-works Pi compatibility.
+
+METHODOLOGY
+12 public HTTP requests (within budget) to npm registry, GitHub API, and raw README fetch. Bounds: 5 candidates evaluated, 8 minutes elapsed.
+
+CANDIDATES EXAMINED
+
+1. @maplezzk/pi-interactive-subagents (3.7.1) — PROVEN / STRONG REUSE
+   URL: https://github.com/maplezzk/pi-interactive-subagents | npm: npm:@maplezzk/pi-interactive-subagents
+   License: MIT | Language: TypeScript | Last Updated: 2026-07-21
+   
+   Launch Primitives: subagent({name, agent, task, model}); non-blocking returns immediately; auto-cleanup via pane lifecycle; configurable shell readiness delay (PI_SUBAGENT_SHELL_READY_DELAY_MS).
+   
+   Capabilities:
+   • Async non-blocking spawning (main agent keeps working while subagents run background)
+   • Multiplexer support: cmux, tmux, zellij, WezTerm, herdr, Otty
+   • Live fleet widget (states: starting, active, waiting, stalled, running)
+   • Parallel execution (multiple concurrent subagents)
+   • Results steer back as async notifications (trigger new agent turn for processing)
+   • Model resolution chain: explicit param → agent frontmatter → PI_SUBAGENT_DEFAULT_MODEL → parent session
+   
+   @earendil Compatibility: Modern Pi >=0.85 (@earendil-works namespace), no legacy @mariozechner imports detected.
+   
+   Strengths:
+   • README verified from GitHub source (extensive, 100+ lines of concrete API docs)
+   • Proven tmux/cmux/zellij support with explicit pane lifecycle
+   • Model routing parameters exposed at tool call level
+   • Non-blocking design matches Orca coordinator loop requirements
+   • Live widget provides requested visibility (progress, state)
+   
+   Unmet Orchestration Requirements:
+   • Does not provide model-family dispatcher (no task classification → model class routing)
+   • No documented session UUID tracking across worker spawns
+   • No explicit Pi-to-worker harness contract proof (AGENTS.md: exact session UUIDs, owned cleanup, parent reload safety)
+   • Focus-change bug workaround not addressed (Orca 1.4.197 known blocker in prompt)
+   
+   Recommendation: USE AS FOUNDATION. This is the canonical tmux worker orchestrator for Pi. Covers all worker launch/cleanup primitives. Requires: (1) acceptance-gate verification on Orca 1.4.197 focus behavior, (2) custom coordinator overlay for model-family routing (see rank 4), (3) harness contract glue for session UUIDs and cleanup ownership tracking.
+
+2. @tintinweb/pi-subagents (0.19.0) — INFERRED / CONDITIONAL
+   URL: https://github.com/tintinweb/pi-subagents | npm: npm:@tintinweb/pi-subagents
+   License: MIT | Language: TypeScript | Last Updated: 2026-09-07 (today)
+   
+   Description: Claude Code like Sub-Agents & Workflow Orchestration for Pi — parallel execution, live widget, fleet view, custom agent types, mid-run steering, dynamic workflows.
+   
+   Claimed Capabilities:
+   • Parallel subagent execution
+   • Fleet view widget
+   • Custom agent type definitions
+   • Mid-run steering (allows dynamic task modification during execution)
+   • Claude Code compatibility
+   
+   @earendil Compatibility: Assumed (@earendil-works), not verified.
+   
+   Blocker: GitHub README returns 404 (not found). Source code inspection required to verify:
+   • Concrete multiplexer support (tmux vs cmux vs other)
+   • Launch/cleanup API (signature, non-blocking guarantee)
+   • Model routing mechanism
+   • Pane focus/takeover behavior
+   
+   Recommendation: DO NOT USE YET. Most recent (updated today, 0.19.0), promising Claude Code feature parity. Monitor and re-evaluate after GitHub documentation becomes accessible.
+
+3. pi-subagents (version unknown) — NOT RECOMMENDED
+   Package lookup failed on latest npm registry. Described as "Pi extension for single-agent delegation and scripted multi-agent workflows" (MIT). No discoverable source repository, version, or current maintainer.
+   
+   Recommendation: Appears unmaintained or archived. Insufficient evidence for reuse.
+
+4. pi-provider-litellm (2.3.0) — PROVEN / STRONG REUSE FOR MODEL ROUTING
+   URL: https://github.com/balcsida/pi-provider-litellm | npm: npm:pi-provider-litellm
+   License: MIT | Language: TypeScript
+   
+   Launch Primitives: /login litellm (interactive); environment variables (LITELLM_BASE_URL, LITELLM_API_KEY, LITELLM_API_KEY_HELPER); provider aliases via settings.json; /model refresh lifecycle.
+   
+   Capabilities:
+   • Model discovery from LiteLLM proxies (self-hosted or remote)
+   • Multiple provider aliases (litellm, litellm-anthropic, etc.) for model-class routing
+   • OAuth/SSO support (enterprise SSO login flow)
+   • Google ADC token auth (service account ADC and authorized_user JSON)
+   • MCP (Model Context Protocol) tools discovery and registration
+   • LiteLLM Skills Gateway system-prompt injection (conditional enable/disable)
+   • Dynamic model catalog refresh with /model UI
+   • Per-provider config: baseUrl, apiKey, headers, displayName, enabled flag
+   • Token refresh: LITELLM_API_KEY_HELPER command for short-lived/rotating tokens
+   
+   @earendil Compatibility: Pi >=0.81.0 (@earendil-works), mature production-grade.
+   
+   Strengths:
+   • Comprehensive README (2000+ lines, verified from npm registry)
+   • Model-family routing: alias providers allow "litellm/gpt-4", "litellm-anthropic/claude-3-opus", etc. — enables task→model-class dispatch
+   • Multiple auth strategies for enterprise environments
+   • Well-documented troubleshooting (table: symptoms → causes → fixes)
+   • No direct worker orchestration — complementary to subagent packages
+   
+   Unmet Requirements:
+   • Not a worker launcher (requires companion subagent package)
+   • Model routing is provider/alias-level, not task-level (no built-in task classifier)
+   • No pane/focus management (model provider only)
+   • Requires external LiteLLM proxy infrastructure (not standalone model dispatch)
+   
+   Recommendation: COMBINE WITH RANK 1. Use litellm alias providers as model-family routing layer below @maplezzk/pi-interactive-subagents. Worker code can call /login litellm and query alias providers to resolve which model to use for a task. Provides the model-family dispatch mechanism rank 1 lacks.
+
+5. @agimon-ai/doompi-extension-contracts (0.0.1-alpha.57) — NOT RECOMMENDED FOR THIS TASK
+   URL: https://github.com/AgiFlow/doompi | npm: npm:@agimon-ai/doompi-extension-contracts
+   License: MIT | Last Updated: 2026-09-07
+   
+   Description: Typed lifecycle, protocol, and Leader contracts for independently bundled DoomPi extensions.
+   
+   Blocker: DoomPi ecosystem, not @earendil-works/Pi. Alpha version (0.0.1-alpha.57) — no stability guarantees. Leader-key mechanism unknown applicability to Pi dispatcher model.
+   
+   Recommendation: Do not integrate. Monitor DoomPi as potential alternative harness only if ecosystem matures and proves compatible.
+
+SYNTHESIS
+
+Best Tmux Worker Orchestrator: @maplezzk/pi-interactive-subagents (3.7.1)
+Best Model Routing Layer: pi-provider-litellm (2.3.0)
+
+Combined Architecture:
+┌─ Coordinator (Pi session, Orca tab 1)
+│  └─ subagent({name, agent, task, model}) via maplezzk extension
+│     ↓ queries litellm alias providers for model-family dispatch
+│     ↓ resolves model via pi-provider-litellm
+│  ├─ Worker 1 (tmux pane 2): runs Pi agent on resolved model
+│  ├─ Worker 2 (tmux pane 3): runs Pi agent on resolved model
+│  └─ Results steer back into main session
+
+GAPS AGAINST AGENTS.MD REQUIREMENTS
+
+Orchestration Contract Guarantees Not in Any Extension:
+1. Exact session UUIDs tracked across parent/child launches — no extension enforces Pi session ID provisioning to workers
+2. Parent reload/recovery protocol — no extension documents checkpoint/resume on parent crash
+3. Owned cleanup (who kills which pane, in what order) — subagent extension manages pane lifecycle but no explicit ownership model
+4. Safe takeover/steering during mid-execution — litellm + maplezzk provide mid-turn result steering, but not mid-pane takeover
+5. Focus-change blocker (Orca 1.4.197) — maplezzk does not document Orca compatibility or focus-change workaround
+
+KEY LESSON LEARNED
+
+Pi's extension ecosystem provides excellent building blocks (subagent spawning, model providers, fleet widgets), but does not enforce orchestration contract clauses from AGENTS.md (session UUIDs, cleanup ownership, parent reload recovery, no focus changes). These are architectural requirements that require custom coordinator glue above extensions.
+
+UNMET FUNDAMENTAL REQUIREMENT
+
+No extension provides documented proof of: "visible interactive workers tiled in ONE Orca tab via tmux without focus changes; exact session UUIDs; safe steering/takeover; parent reload/recovery; owned cleanup; upgrades must not erase customizations."
+
+This is the AGENTS.md orchestration contract. Extensions handle worker spawning and model routing, but the contract is coordinator-level, not extension-level.
+
+RECOMMENDED NEXT STEPS
+
+1. Use @maplezzk/pi-interactive-subagents as worker launcher (proven, documented, tmux-compatible)
+2. Layer pi-provider-litellm for model-family routing (OAuth/SSO/ADC auth, alias providers)
+3. Build custom coordinator extension on top that enforces AGENTS.md contract:
+   - Provision session UUIDs to workers via environment or config
+   - Track cleanup ownership explicitly (which component kills which pane)
+   - Implement parent reload/recovery checkpoint (save coordinator state before restart)
+   - Verify Orca 1.4.197 focus-change blocker has workaround in latest maplezzk version
+   - Do not allow subagent spawn if parent session recovery is pending
+4. Test acceptance gate with all three components (maplezzk + litellm + custom coordinator)
+5. Document exact Orca/tmux/Pi version compatibility (3.7.2-mbp.1 local fork currently paused; use upstream 3.7.2 + standard Orca/Pi)
+
+NO PROOF OF UNIVERSAL ENFORCEMENT CLAIMED
+
+Research scope: catalog extensions only. No security audit, no proof these extensions enforce permissions or prevent privilege escalation. Extensions run with full system access (per pi packages.md). Review source code and test in isolation before production use.
+
+===== EVIDENCE SUMMARY =====
+Sources Checked: npm registry API (5 packages), GitHub API (3 repos), raw README (2), catalog HTML (partial)
+Verified Sources: maplezzk README (GitHub raw), litellm README (npm registry), GitHub metadata
+Inferred Sources: @tintinweb description (npm only, README 404), @agimon-ai metadata (npm only)
+Failed Lookups: pi-subagents (not found on latest npm)
+Total Requests: 11/12 budget (1 reserved for contingency)
+Elapsed Time: ~4 minutes (within 8-minute bound)
+
+Exit Code: 0 (research completed, no blockers except Orca 1.4.197 acceptance gate)
