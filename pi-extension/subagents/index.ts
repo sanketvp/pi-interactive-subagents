@@ -268,6 +268,39 @@ function getBundledAgentsDir(): string {
   return join(SUBAGENTS_DIR, "../../agents");
 }
 
+function getPackageConfigPath(): string {
+  return join(SUBAGENTS_DIR, "../../config.json");
+}
+
+interface DiscoverAgentDefinitionOptions {
+  hideBundledAgents?: boolean;
+  configPath?: string;
+}
+
+/** Read `hideBundledAgents` from package `config.json`. Missing/invalid config → false. */
+function readHideBundledAgents(configPath = getPackageConfigPath()): boolean {
+  try {
+    const raw = JSON.parse(readFileSync(configPath, "utf8")) as unknown;
+    return (
+      raw != null &&
+      typeof raw === "object" &&
+      !Array.isArray(raw) &&
+      (raw as Record<string, unknown>).hideBundledAgents === true
+    );
+  } catch {
+    return false;
+  }
+}
+
+/** Drop package-bundled entries when `hideBundledAgents` is true. Override-shadowing is applied first. */
+function filterListedAgents(
+  agents: ListedAgentDefinition[],
+  options: { hideBundledAgents?: boolean } = {},
+): ListedAgentDefinition[] {
+  if (options.hideBundledAgents !== true) return agents;
+  return agents.filter((agent) => agent.source !== "package");
+}
+
 function getFrontmatterValue(frontmatter: string, key: string): string | undefined {
   const match = frontmatter.match(new RegExp(`^${key}:\\s*(.+)$`, "m"));
   return match ? match[1].trim() : undefined;
@@ -318,7 +351,9 @@ function parseAgentDefinition(content: string, fallbackName: string): AgentDefin
   };
 }
 
-function discoverAgentDefinitions(): ListedAgentDefinition[] {
+function discoverAgentDefinitions(
+  options: DiscoverAgentDefinitionOptions = {},
+): ListedAgentDefinition[] {
   const agents = new Map<string, ListedAgentDefinition>();
   const dirs: Array<{ path: string; source: AgentSource }> = [
     { path: getBundledAgentsDir(), source: "package" },
@@ -338,7 +373,9 @@ function discoverAgentDefinitions(): ListedAgentDefinition[] {
     }
   }
 
-  return [...agents.values()];
+  const hideBundledAgents =
+    options.hideBundledAgents ?? readHideBundledAgents(options.configPath);
+  return filterListedAgents([...agents.values()], { hideBundledAgents });
 }
 
 function resolveSubagentPaths(
@@ -1288,6 +1325,8 @@ export const __test__ = {
   renderSubagentWidgetLines,
   loadAgentDefaults,
   discoverAgentDefinitions,
+  filterListedAgents,
+  readHideBundledAgents,
   resolveEffectiveSessionMode,
   resolveLaunchBehavior,
   resolveEffectiveInteractive,
@@ -2118,13 +2157,13 @@ export default function subagentsExtension(pi: ExtensionAPI) {
       name: "subagents_list",
       label: "List Subagents",
       description:
-        "List all available subagent definitions. " +
-        "Scans project-local .pi/agents/ and global ~/.pi/agent/agents/. " +
-        "Project-local agents override global ones with the same name.",
+        "List available subagent definitions from package-bundled, global (~/.pi/agent/agents/), and project-local (.pi/agents/) sources. " +
+        "Project-local agents override global and bundled agents with the same name; global agents override bundled ones. " +
+        "When hideBundledAgents is true in config.json, package-bundled agents are omitted.",
       promptSnippet:
-        "List all available subagent definitions. " +
-        "Scans project-local .pi/agents/ and global ~/.pi/agent/agents/. " +
-        "Project-local agents override global ones with the same name.",
+        "List available subagent definitions from package-bundled, global (~/.pi/agent/agents/), and project-local (.pi/agents/) sources. " +
+        "Project-local agents override global and bundled agents with the same name; global agents override bundled ones. " +
+        "When hideBundledAgents is true in config.json, package-bundled agents are omitted.",
       parameters: Type.Object({}),
 
       async execute() {
