@@ -149,6 +149,9 @@ const SubagentParams = Type.Object({
     Type.String({ description: "Appended to system prompt (role instructions)" }),
   ),
   model: Type.Optional(Type.String({ description: "Model override (overrides agent default)" })),
+  thinking: Type.Optional(
+    Type.String({ description: "Thinking level override (overrides agent default): off, minimal, low, medium, high, xhigh" }),
+  ),
   skills: Type.Optional(
     Type.String({ description: "Comma-separated skills (overrides agent default)" }),
   ),
@@ -1207,7 +1210,7 @@ function resolveSubagentRouting(
 }
 
 function requestedIdentity(
-  params: { model?: string },
+  params: { model?: string; thinking?: string },
   agentDefs: AgentDefaults | null,
   ctx: { model?: { provider?: string; id?: string }; thinkingLevel?: string },
 ): { provider: string; model: string; thinking: string } {
@@ -1223,7 +1226,7 @@ function requestedIdentity(
   }
   provider = provider || ctx.model?.provider;
   model = model || ctx.model?.id;
-  const thinking = agentDefs?.thinking || ctx.thinkingLevel || "off";
+  const thinking = params.thinking || agentDefs?.thinking || ctx.thinkingLevel || "off";
   if (!provider || !model) {
     throw new Error("Cannot record requested provider/model; ctx.model fields unavailable");
   }
@@ -2242,6 +2245,9 @@ export default function subagentsExtension(pi: ExtensionAPI) {
               "Whether the resumed session should automatically exit after completing its response. Defaults to true for autonomous follow-up work; set false for interactive resumed sessions.",
           }),
         ),
+        thinking: Type.Optional(
+          Type.String({ description: "Thinking level override (overrides the resumed session default): off, minimal, low, medium, high, xhigh" }),
+        ),
       }),
 
       renderCall(args, theme) {
@@ -2278,7 +2284,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         if (process.env.PI_SUBAGENT_ID) throw new Error("Nested worker spawning is disabled");
         requireTuiParent(ctx);
         const name = params.name ?? "Resume";
-        validateLaunch({ name }, null, !!process.env.PI_SUBAGENT_ID);
+        validateLaunch({ name, thinking: params.thinking }, null, !!process.env.PI_SUBAGENT_ID);
         if (getMuxBackend() !== "tmux") throw new Error("This hardened fork requires tmux");
         const { autoExit, interactive } = resolveResumeLaunchBehavior(params);
         if (!isMuxAvailable()) {
@@ -2308,8 +2314,8 @@ export default function subagentsExtension(pi: ExtensionAPI) {
           .filter((w) => w.sessionFile === canonicalSession && w.requested)
           .sort((a, b) => b.createdAt - a.createdAt)[0];
         const requested = prior
-          ? { ...prior.requested }
-          : requestedIdentity({}, null, ctx);
+          ? { ...prior.requested, thinking: params.thinking ?? prior.requested.thinking }
+          : requestedIdentity(params, null, ctx);
         const artifactDir = getArtifactDir(ctx.sessionManager.getSessionDir(), parentSessionId);
         const attemptId = randomUUID();
         const activityFile = getSubagentActivityFile(artifactDir, attemptId);

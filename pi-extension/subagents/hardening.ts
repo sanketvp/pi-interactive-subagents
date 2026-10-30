@@ -1,6 +1,8 @@
 // This fork is Pi-only. Validate before creating a pane or writing artifacts.
+const THINKING_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh'];
+
 export function validateLaunch(
-  params: {name: string; agent?: string},
+  params: {name: string; agent?: string; thinking?: string},
   defaults: {cli?: string} | null,
   nested = false,
 ): void {
@@ -9,6 +11,9 @@ export function validateLaunch(
   }
   if (params.agent && !/^[a-zA-Z0-9][a-zA-Z0-9_-]*$/.test(params.agent)) {
     throw new Error('Agent must be a simple definition name, not a path');
+  }
+  if (params.thinking !== undefined && !THINKING_LEVELS.includes(params.thinking)) {
+    throw new Error(`Thinking level must be one of: ${THINKING_LEVELS.join(', ')}`);
   }
   if (defaults?.cli && defaults.cli !== 'pi') throw new Error('Only Pi worker launches are permitted');
   if (nested) throw new Error('Nested worker spawning is disabled');

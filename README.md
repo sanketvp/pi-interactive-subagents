@@ -186,6 +186,7 @@ subagent({ name: "Designer", agent: "game-designer", cwd: "agents/game-designer"
 | `fork`                 | boolean | `false`        | Force the full-context fork mode for this spawn, overriding any agent `session-mode` frontmatter  |
 | `interactive`          | boolean | derived        | Mark this spawn as interactive (don't wake the parent on stall/recovery). Defaults to the agent's `interactive` frontmatter, otherwise the inverse of `auto-exit`. |
 | `model`                | string  | —              | Override agent's default model                                                                    |
+| `thinking`             | string  | derived        | Override thinking level: `off`, `minimal`, `low`, `medium`, `high`, or `xhigh`                 |
 | `systemPrompt`         | string  | —              | Append to system prompt                                                                           |
 | `skills`               | string  | —              | Comma-separated skill names                                                                       |
 | `tools`                | string  | —              | Comma-separated tool names                                                                        |
