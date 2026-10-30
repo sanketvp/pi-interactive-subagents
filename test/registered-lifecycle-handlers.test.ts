@@ -285,13 +285,13 @@ describe("registered subagent_resume tool", () => {
       fireOnly(handlers, "session_start", { reason: "startup" }, ctx);
 
       const resumeTool = tools["subagent_resume"];
-      const result = await resumeTool.execute("tc1", { sessionPath: childSessionFile, name: "argv-check" }, undefined, undefined, ctx);
+      const result = await resumeTool.execute("tc1", { sessionPath: childSessionFile, name: "argv-check", thinking: "medium" }, undefined, undefined, ctx);
       const scriptBody = readFileSync(result.details.launchScriptFile, "utf8");
 
       assert.match(scriptBody, /'--interactive'/, "dispatcher mode must be the dormant --interactive mode, not print mode");
       assert.match(scriptBody, /'--provider'\n\s*'xai'/);
       assert.match(scriptBody, /'--model'\n\s*'grok-4\.6'/);
-      assert.match(scriptBody, /'--effort'\n\s*'high'/);
+      assert.match(scriptBody, /'--effort'\n\s*'medium'/);
       const escapedSession = expectedCanonical.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
       assert.match(scriptBody, new RegExp(`'--session'\\n\\s*'${escapedSession}'`), "must pass the exact canonical resumed session file");
     } finally {
