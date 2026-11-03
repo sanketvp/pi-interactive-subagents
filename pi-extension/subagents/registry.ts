@@ -87,15 +87,13 @@ export interface ModelIdentity {
   thinking: string;
 }
 
-export type WorkerHostRecord = WorkerHostIdentity;
-
 export interface AttemptRecord {
   attemptId: string;
   parentSessionId: string;
   piSessionId: string | null;
   invocation: number;
   completionToken: string;
-  host: WorkerHostRecord;
+  host: WorkerHostIdentity;
   container: string;
   surface: string | null;
   sessionFile: string;

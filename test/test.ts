@@ -1879,7 +1879,7 @@ describe("subagent activity snapshots", () => {
 describe("subagent interruption", () => {
   // Interrupt must only ever target an exact owned tmux pane (`%N`) on the
   // CURRENT tmux socket (finding P1-3). Fixtures therefore use a real pane
-  // id + matching tmuxSocket, and the current process.env.TMUX is pointed
+  // id + matching attempt host, and the current process.env.TMUX is pointed
   // at that same socket for the duration of this suite.
   const TEST_SOCKET = "/tmp/pi-interrupt-test-sock";
   // isExactOwnedSurface (close-to-scope fix): `%N` format + matching socket
@@ -1911,14 +1911,24 @@ describe("subagent interruption", () => {
     setLifecycleAdapter(null);
   });
 
+  function makeAttempt(overrides: Record<string, unknown> = {}) {
+    return {
+      attemptId: "a1",
+      completionToken: FAKE_TOKEN,
+      host: { kind: "tmux", id: TEST_SOCKET },
+      container: "@0",
+      ...overrides,
+    };
+  }
+
   function makeRunning(overrides: Record<string, unknown> = {}) {
     return {
       id: "a1",
       name: "Worker",
       task: "",
       surface: "%1",
-      tmuxSocket: TEST_SOCKET,
       completionToken: FAKE_TOKEN,
+      attempt: makeAttempt(),
       startTime: 0,
       sessionFile: "worker.jsonl",
       interactive: false,
@@ -1987,13 +1997,13 @@ describe("subagent interruption", () => {
     assert.match(malformed.error, /Refusing to interrupt/);
 
     const foreignSocket = testApi.requestSubagentInterrupt(
-      makeRunning({ tmuxSocket: "/tmp/some-other-socket" }),
+      makeRunning({ attempt: makeAttempt({ host: { kind: "tmux", id: "/tmp/some-other-socket" } }) }),
       bump,
     );
     assert.match(foreignSocket.error, /Refusing to interrupt/);
 
-    const noSocket = testApi.requestSubagentInterrupt(makeRunning({ tmuxSocket: undefined }), bump);
-    assert.match(noSocket.error, /Refusing to interrupt/);
+    const noAttempt = testApi.requestSubagentInterrupt(makeRunning({ attempt: undefined }), bump);
+    assert.match(noAttempt.error, /Refusing to interrupt/);
 
     assert.equal(calls, 0, "no tmux call should have been issued for any invalid surface");
 
@@ -2013,11 +2023,11 @@ describe("subagent interruption", () => {
     let calls = 0;
     const bump = () => { calls += 1; };
 
-    const wrongToken = testApi.requestSubagentInterrupt(makeRunning({ completionToken: "not-the-real-token" }), bump);
+    const wrongToken = testApi.requestSubagentInterrupt(makeRunning({ attempt: makeAttempt({ completionToken: "not-the-real-token" }) }), bump);
     assert.match(wrongToken.error, /Refusing to interrupt/);
     assert.equal(calls, 0);
 
-    const noToken = testApi.requestSubagentInterrupt(makeRunning({ completionToken: undefined }), bump);
+    const noToken = testApi.requestSubagentInterrupt(makeRunning({ attempt: makeAttempt({ completionToken: undefined }) }), bump);
     assert.match(noToken.error, /Refusing to interrupt/);
     assert.equal(calls, 0);
 

@@ -20,7 +20,6 @@ import {
   canonicalizeSessionFile,
   classifySocket,
   closeOwned,
-  currentTmuxSocket,
   diagnoseText,
   dispatcherPath,
   freezePaneStartCommand,
@@ -39,7 +38,7 @@ import {
   requestedObservedMismatch,
   writeLaunchScript,
 } from "./lifecycle.ts";
-import { TmuxWorkerHost, currentWorkerHost, type WorkerHost } from "./worker-host.ts";
+import { TmuxWorkerHost, currentWorkerHost, tmuxSocketFromEnv, type WorkerHost } from "./worker-host.ts";
 import { getLifecycleAdapter, setLifecycleAdapter } from "./adapter.ts";
 import {
   validateCompletion,
@@ -600,8 +599,6 @@ interface RunningSubagent {
   launchScriptFile?: string;
   completionFile?: string;
   completionToken?: string;
-  /** Legacy runtime mirror retained for interrupt compatibility. */
-  tmuxSocket?: string;
   activityFile?: string;
   activity?: SubagentActivityState;
   activityRead?: {
@@ -980,10 +977,10 @@ function resolveInterruptTarget(params: { id?: string; name?: string }):
 function isExactOwnedSurface(running: RunningSubagent): boolean {
   const surface = running.surface;
   if (!surface || !/^%\d+$/.test(surface)) return false;
-  const host = running.attempt
-    ? hostForAttempt(running.attempt)
-    : (running.tmuxSocket ? new TmuxWorkerHost(running.tmuxSocket, getLifecycleAdapter()) : null);
-  if (!host || host.identity.id !== currentTmuxSocket()) return false;
+  const attempt = running.attempt;
+  if (!attempt) return false;
+  const host = hostForAttempt(attempt);
+  if (host.identity.id !== tmuxSocketFromEnv()) return false;
   // `%N` format + matching socket alone is NOT proof of current ownership:
   // tmux pane ids can be reused/collide across separate tmux server
   // processes bound to the same socket path over time, and a stale/foreign
@@ -991,10 +988,8 @@ function isExactOwnedSurface(running: RunningSubagent): boolean {
   // this attempt's pane. Require the pane's live @pi-worker-token tag to
   // match the record's completionToken -- the same ownership proof already
   // required before releasing or closing a pane (readPaneToken/killOwnedPane).
-  const token = running.attempt?.completionToken ?? running.completionToken;
-  if (!token) return false;
   try {
-    return host.ownsSurface(surface, running.attempt?.attemptId ?? "", token);
+    return host.ownsSurface(surface, attempt.attemptId, attempt.completionToken);
   } catch {
     return false;
   }
@@ -1296,7 +1291,6 @@ function runningFromAttempt(
     launchScriptFile: record.launchScriptFile,
     completionFile: record.completionFile,
     completionToken: record.completionToken,
-    tmuxSocket: record.host.id,
     interactive: !!record.interactive,
     statusState: createStatusState({ source: "pi", startTimeMs: record.createdAt }),
     attempt: record,
@@ -1311,7 +1305,6 @@ function syncAttempt(running: RunningSubagent, record: AttemptRecord): void {
   running.sessionFile = record.sessionFile;
   running.completionFile = record.completionFile;
   running.completionToken = record.completionToken;
-  running.tmuxSocket = record.host.id;
 }
 
 function commitRegistry(next: WorkerRegistry, record?: AttemptRecord, running?: RunningSubagent): void {
@@ -1725,7 +1718,7 @@ async function watchSubagent(
       sessionFile,
     };
   }
-  const foreign = classifySocket(record, currentTmuxSocket()) === "foreign";
+  const foreign = classifySocket(record, tmuxSocketFromEnv()) === "foreign";
   let sawExit = false;
   try {
     while (!signal.aborted && watcherIsCurrent(running)) {
@@ -1882,7 +1875,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
     workerRegistry = loaded.registry;
     invocationCount = loaded.registry.invocations;
     registryReady = true;
-    const currentSocket = currentTmuxSocket();
+    const currentSocket = tmuxSocketFromEnv();
     for (const original of loaded.registry.workers) {
       const recovered = applyRecovery(registryFile, workerRegistry, original, currentSocket);
       commitRegistry(recovered.registry, recovered.record);
@@ -2469,7 +2462,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         ctx.ui.notify("Registry unavailable", "error");
         return;
       }
-      if (classifySocket(record, currentTmuxSocket()) === "foreign") {
+      if (classifySocket(record, tmuxSocketFromEnv()) === "foreign") {
         ctx.ui.notify("Foreign-socket workers cannot be released from this session (zero tmux calls).", "error");
         return;
       }

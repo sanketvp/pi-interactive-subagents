@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { getLifecycleAdapter, type LifecycleAdapter } from "./adapter.ts";
-import { TmuxWorkerHost, tmuxSocketFromEnv, type WorkerHost, type WorkerSurfaceEvidence } from "./worker-host.ts";
+import { TmuxWorkerHost, type WorkerHost, type WorkerSurfaceEvidence } from "./worker-host.ts";
 import {
   type AttemptRecord,
   type DeliveryState,
@@ -28,9 +28,6 @@ export const DEFAULT_DISPATCHER = join(homedir(), ".claude", "scripts", "pi-disp
 export function dispatcherPath(): string {
   return process.env.PI_DISPATCH_SH || DEFAULT_DISPATCHER;
 }
-
-export const currentTmuxSocket = tmuxSocketFromEnv;
-
 
 export function readSessionHeaderId(sessionFile: string, adapter = getLifecycleAdapter()): string {
   const raw = adapter.fs.readFileSync(sessionFile, "utf8");
