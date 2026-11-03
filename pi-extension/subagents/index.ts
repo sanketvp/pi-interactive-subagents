@@ -20,8 +20,6 @@ import {
   canonicalizeSessionFile,
   classifySocket,
   closeOwned,
-  currentTmuxSocket,
-  currentWindowId,
   diagnoseText,
   dispatcherPath,
   freezePaneStartCommand,
@@ -34,13 +32,13 @@ import {
   persistRecord,
   persistRegistry,
   persistSplitRequested,
-  readPaneToken,
   readSessionHeaderId,
   recoverSurface,
   releaseWithoutClose,
   requestedObservedMismatch,
   writeLaunchScript,
 } from "./lifecycle.ts";
+import { TmuxWorkerHost, currentWorkerHost, tmuxSocketFromEnv, type WorkerHost } from "./worker-host.ts";
 import { getLifecycleAdapter, setLifecycleAdapter } from "./adapter.ts";
 import {
   validateCompletion,
@@ -601,7 +599,6 @@ interface RunningSubagent {
   launchScriptFile?: string;
   completionFile?: string;
   completionToken?: string;
-  tmuxSocket?: string;
   activityFile?: string;
   activity?: SubagentActivityState;
   activityRead?: {
@@ -980,21 +977,19 @@ function resolveInterruptTarget(params: { id?: string; name?: string }):
 function isExactOwnedSurface(running: RunningSubagent): boolean {
   const surface = running.surface;
   if (!surface || !/^%\d+$/.test(surface)) return false;
-  const socket = running.attempt?.tmuxSocket ?? running.tmuxSocket;
-  if (!socket) return false;
-  const current = currentTmuxSocket();
-  if (!current || socket !== current) return false;
+  const attempt = running.attempt;
+  if (!attempt) return false;
+  const host = hostForAttempt(attempt);
+  if (host.identity.id !== tmuxSocketFromEnv()) return false;
   // `%N` format + matching socket alone is NOT proof of current ownership:
   // tmux pane ids can be reused/collide across separate tmux server
   // processes bound to the same socket path over time, and a stale/foreign
   // record could otherwise target a pane that is no longer (or never was)
   // this attempt's pane. Require the pane's live @pi-worker-token tag to
   // match the record's completionToken -- the same ownership proof already
-  // required before releasing or closing a pane (readPaneToken/killOwnedPane).
-  const token = running.attempt?.completionToken ?? running.completionToken;
-  if (!token) return false;
+  // required before releasing or closing a pane.
   try {
-    return readPaneToken(socket, surface, getLifecycleAdapter()) === token;
+    return host.ownsSurface(surface, attempt.attemptId, attempt.completionToken);
   } catch {
     return false;
   }
@@ -1274,6 +1269,13 @@ function buildDispatcherArgs(options: {
   return args;
 }
 
+function hostForAttempt(record: AttemptRecord): WorkerHost {
+  const adapter = getLifecycleAdapter();
+  if (adapter.workerHost) return adapter.workerHost(record.host);
+  if (record.host.kind !== "tmux") throw new Error(`Unsupported worker host: ${record.host.kind}`);
+  return new TmuxWorkerHost(record.host.id, adapter);
+}
+
 function runningFromAttempt(
   record: AttemptRecord,
   extras: Partial<RunningSubagent> = {},
@@ -1289,7 +1291,6 @@ function runningFromAttempt(
     launchScriptFile: record.launchScriptFile,
     completionFile: record.completionFile,
     completionToken: record.completionToken,
-    tmuxSocket: record.tmuxSocket,
     interactive: !!record.interactive,
     statusState: createStatusState({ source: "pi", startTimeMs: record.createdAt }),
     attempt: record,
@@ -1304,7 +1305,6 @@ function syncAttempt(running: RunningSubagent, record: AttemptRecord): void {
   running.sessionFile = record.sessionFile;
   running.completionFile = record.completionFile;
   running.completionToken = record.completionToken;
-  running.tmuxSocket = record.tmuxSocket;
 }
 
 function commitRegistry(next: WorkerRegistry, record?: AttemptRecord, running?: RunningSubagent): void {
@@ -1392,10 +1392,10 @@ async function launchSubagentImpl(
   const effectiveInteractive = resolveEffectiveInteractive(params, agentDefs);
   const requested = requestedIdentity(params, agentDefs, ctx);
   const adapter = getLifecycleAdapter();
-  const tmuxSocket = currentTmuxSocket();
+  const host = currentWorkerHost(process.env, adapter);
   const parentPane = process.env.TMUX_PANE;
-  if (!tmuxSocket || !parentPane) throw new Error("tmux socket/window identity is required");
-  const windowId = currentWindowId(tmuxSocket, parentPane, adapter);
+  if (!host || !parentPane) throw new Error("tmux socket/window identity is required");
+  const container = host.currentContainer(parentPane);
 
   const sessionFile = ctx.sessionManager.getSessionFile();
   if (!sessionFile) throw new Error("No session file");
@@ -1497,8 +1497,8 @@ async function launchSubagentImpl(
     sessionFile: subagentSessionFile,
     launchScriptFile,
     completionFile,
-    tmuxSocket,
-    windowId,
+    host,
+    container,
     requested,
     interactive: effectiveInteractive,
     paneStartCommand: freezePaneStartCommand(launchScriptFile),
@@ -1533,7 +1533,7 @@ async function launchSubagentImpl(
     scriptPath: launchScriptFile,
     attemptId: began.record.attemptId,
     token: began.record.completionToken,
-    socket: tmuxSocket,
+    ownershipPreamble: host.ownershipPreamble(began.record.attemptId, began.record.completionToken),
     dispatcher: dispatcherPath(),
     dispatcherArgs,
     env,
@@ -1718,7 +1718,7 @@ async function watchSubagent(
       sessionFile,
     };
   }
-  const foreign = classifySocket(record, currentTmuxSocket()) === "foreign";
+  const foreign = classifySocket(record, tmuxSocketFromEnv()) === "foreign";
   let sawExit = false;
   try {
     while (!signal.aborted && watcherIsCurrent(running)) {
@@ -1875,7 +1875,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
     workerRegistry = loaded.registry;
     invocationCount = loaded.registry.invocations;
     registryReady = true;
-    const currentSocket = currentTmuxSocket();
+    const currentSocket = tmuxSocketFromEnv();
     for (const original of loaded.registry.workers) {
       const recovered = applyRecovery(registryFile, workerRegistry, original, currentSocket);
       commitRegistry(recovered.registry, recovered.record);
@@ -2299,10 +2299,10 @@ export default function subagentsExtension(pi: ExtensionAPI) {
           };
         }
         const adapter = getLifecycleAdapter();
-        const tmuxSocket = currentTmuxSocket();
+        const host = currentWorkerHost(process.env, adapter);
         const parentPane = process.env.TMUX_PANE;
-        if (!tmuxSocket || !parentPane) throw new Error("tmux socket/window identity is required");
-        const windowId = currentWindowId(tmuxSocket, parentPane, adapter);
+        if (!host || !parentPane) throw new Error("tmux socket/window identity is required");
+        const container = host.currentContainer(parentPane);
         const canonicalSession = canonicalizeSessionFile(params.sessionPath, adapter);
         const expectedPiSessionId = readSessionHeaderId(canonicalSession, adapter);
         const parentSessionId = ctx.sessionManager.getSessionId();
@@ -2343,8 +2343,8 @@ export default function subagentsExtension(pi: ExtensionAPI) {
           sessionFile: canonicalSession,
           launchScriptFile,
           completionFile,
-          tmuxSocket,
-          windowId,
+          host,
+          container,
           requested,
           interactive,
           paneStartCommand: freezePaneStartCommand(launchScriptFile),
@@ -2374,7 +2374,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
           scriptPath: launchScriptFile,
           attemptId: began.record.attemptId,
           token: began.record.completionToken,
-          socket: tmuxSocket,
+          ownershipPreamble: host.ownershipPreamble(began.record.attemptId, began.record.completionToken),
           dispatcher: dispatcherPath(),
           dispatcherArgs,
           env,
@@ -2462,7 +2462,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         ctx.ui.notify("Registry unavailable", "error");
         return;
       }
-      if (classifySocket(record, currentTmuxSocket()) === "foreign") {
+      if (classifySocket(record, tmuxSocketFromEnv()) === "foreign") {
         ctx.ui.notify("Foreign-socket workers cannot be released from this session (zero tmux calls).", "error");
         return;
       }

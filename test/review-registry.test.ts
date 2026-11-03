@@ -25,8 +25,8 @@ function worker(overrides: Record<string, unknown> = {}) {
     piSessionId: null,
     invocation: 1,
     completionToken: randomUUID(),
-    tmuxSocket: "/tmp/tmux-test/sock",
-    windowId: "@0",
+    host: { kind: "tmux", id: "/tmp/tmux-test/sock" },
+    container: "@0",
     surface: "%1",
     sessionFile: join(root, "session.jsonl"),
     launchScriptFile: join(root, "launch.sh"),
@@ -61,6 +61,20 @@ describe("registry v2", () => {
     assert.equal(v2.review.sandbox.addonLoaded, false);
     assert.deepEqual(v2.review.coordinatorEvents, []);
     assert.deepEqual(v2.review.profileCopies, {});
+  });
+
+  it("normalizes legacy worker identities in v2 documents", () => {
+    const legacyWorker = worker() as Record<string, unknown>;
+    delete legacyWorker.host;
+    delete legacyWorker.container;
+    legacyWorker.tmuxSocket = "/tmp/tmux-test/sock";
+    legacyWorker.windowId = "@0";
+    const v2 = { ...freshRegistryV2(), workers: [legacyWorker] };
+    const validated = validateRegistryV2(v2);
+    assert.deepEqual(validated.workers[0].host, { kind: "tmux", id: "/tmp/tmux-test/sock" });
+    assert.equal(validated.workers[0].container, "@0");
+    assert.equal((validated.workers[0] as Record<string, unknown>).tmuxSocket, undefined);
+    assert.equal((validated.workers[0] as Record<string, unknown>).windowId, undefined);
   });
 
   it("migration is validator-clean; .v1.bak written once; legacy intents abandoned", () => {

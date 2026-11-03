@@ -41,7 +41,7 @@ exec /bin/sh
   const adapter=createDefaultAdapter();
   setLifecycleAdapter(adapter);
   const record:any={
-   attemptId, completionToken:token, tmuxSocket:socketPath, windowId:window,
+   attemptId, completionToken:token, host:{kind:'tmux',id:socketPath}, container:window,
    surface:null, paneStartCommand:startCmd, resourceState:'split_requested',
    parentSessionId:randomUUID(), piSessionId:null, invocation:1,
    sessionFile:join(root,'s.jsonl'), launchScriptFile:script, completionFile:join(root,'done.json'),

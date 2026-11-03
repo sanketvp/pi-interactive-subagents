@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { getLifecycleAdapter, type LifecycleAdapter } from "./adapter.ts";
+import { TmuxWorkerHost, type WorkerHost, type WorkerSurfaceEvidence } from "./worker-host.ts";
 import {
   type AttemptRecord,
   type DeliveryState,
@@ -26,18 +27,6 @@ export const DEFAULT_DISPATCHER = join(homedir(), ".claude", "scripts", "pi-disp
 
 export function dispatcherPath(): string {
   return process.env.PI_DISPATCH_SH || DEFAULT_DISPATCHER;
-}
-
-export function currentTmuxSocket(env: NodeJS.ProcessEnv = process.env): string | null {
-  const tmux = env.TMUX;
-  if (!tmux) return null;
-  const socket = tmux.split(",")[0];
-  return socket || null;
-}
-
-export function tmuxArgs(socket: string, args: string[]): string[] {
-  if (!socket) throw new Error("tmux socket is required; refusing default-server operations");
-  return ["-S", socket, ...args];
 }
 
 export function readSessionHeaderId(sessionFile: string, adapter = getLifecycleAdapter()): string {
@@ -112,8 +101,8 @@ export interface BeginAttemptInput {
   sessionFile: string;
   launchScriptFile: string;
   completionFile: string;
-  tmuxSocket: string;
-  windowId: string;
+  host: WorkerHost;
+  container: string;
   requested: ModelIdentity;
   interactive: boolean;
   paneStartCommand?: string;
@@ -125,14 +114,15 @@ export function persistPreparingIntent(input: BeginAttemptInput, adapter = getLi
   assertCanLaunch(input.registry);
   assertUniqueSessionWriter(input.registry, input.sessionFile);
   const invocation = input.registry.invocations + 1;
+  const { host, container } = input;
   const record: AttemptRecord = {
     attemptId: input.attemptId ?? randomUUID(),
     parentSessionId: input.parentSessionId,
     piSessionId: input.expectedPiSessionId ?? null,
     invocation,
     completionToken: input.completionToken ?? randomUUID(),
-    tmuxSocket: input.tmuxSocket,
-    windowId: input.windowId,
+    host: host.identity,
+    container,
     surface: null,
     sessionFile: input.sessionFile,
     launchScriptFile: input.launchScriptFile,
@@ -177,7 +167,7 @@ export interface LaunchScriptInput {
   scriptPath: string;
   attemptId: string;
   token: string;
-  socket: string;
+  ownershipPreamble: string;
   dispatcher: string;
   dispatcherArgs: string[];
   env: Record<string, string>;
@@ -196,9 +186,7 @@ export function writeLaunchScript(input: LaunchScriptInput, adapter = getLifecyc
   if (input.waitFile) {
     lines.push(`while [ ! -f ${bashSingleQuote(input.waitFile)} ]; do sleep 0.05; done`);
   }
-  lines.push(
-    `tmux -S ${bashSingleQuote(input.socket)} set-option -p -t "$TMUX_PANE" @pi-attempt ${bashSingleQuote(input.attemptId)} && tmux -S ${bashSingleQuote(input.socket)} set-option -p -t "$TMUX_PANE" @pi-worker-token ${bashSingleQuote(input.token)} || exit 66`,
-  );
+  lines.push(input.ownershipPreamble);
   for (const [key, value] of Object.entries(input.env)) {
     lines.push(`export ${key}=${bashSingleQuote(value)}`);
   }
@@ -241,42 +229,32 @@ export function persistSplitRequested(
   return { registry: next, record: nextRecord };
 }
 
-export interface PaneIdentity {
-  paneId: string;
-  paneStartCommand: string;
-  attemptTag: string;
+function hostFor(record: AttemptRecord, adapter = getLifecycleAdapter()): WorkerHost {
+  const host = record.host;
+  if (adapter.workerHost) return adapter.workerHost(host);
+  if (host.kind !== "tmux") throw new Error(`Unsupported worker host: ${host.kind}`);
+  return new TmuxWorkerHost(host.id, adapter);
 }
 
-export function listWindowPanes(socket: string, windowId: string, adapter = getLifecycleAdapter()): PaneIdentity[] {
-  const output = adapter.tmux(
-    tmuxArgs(socket, ["list-panes", "-t", windowId, "-F", "#{pane_id}\t#{pane_start_command}\t#{@pi-attempt}"]),
-  );
-  if (!output) return [];
-  return output.split(/\r?\n/).filter(Boolean).map((line) => {
-    const [paneId, paneStartCommand = "", attemptTag = ""] = line.split("\t");
-    return { paneId, paneStartCommand, attemptTag };
-  });
-}
-
-export function matchPaneIdentity(record: AttemptRecord, panes: PaneIdentity[]): PaneIdentity | null {
+export function matchPaneIdentity(record: AttemptRecord, panes: WorkerSurfaceEvidence[]): WorkerSurfaceEvidence | null {
   const byAttempt = panes.find((pane) => pane.attemptTag === record.attemptId);
   if (byAttempt) return byAttempt;
-  const byStart = panes.find((pane) => pane.paneStartCommand === record.paneStartCommand);
+  const byStart = panes.find((pane) => pane.launchCommand === record.paneStartCommand);
   return byStart ?? null;
 }
 
 export function recoverSurface(
   record: AttemptRecord,
   adapter = getLifecycleAdapter(),
-): { kind: "adopted"; pane: PaneIdentity } | { kind: "proven_absent" } | { kind: "unknown"; reason: string } {
+): { kind: "adopted"; pane: WorkerSurfaceEvidence } | { kind: "proven_absent" } | { kind: "unknown"; reason: string } {
   try {
-    const panes = listWindowPanes(record.tmuxSocket, record.windowId, adapter);
+    const panes = hostFor(record, adapter).listSurfaces(record.container);
     const match = matchPaneIdentity(record, panes);
     if (match) return { kind: "adopted", pane: match };
     if (record.resourceState === "split_requested" && record.surface === null) {
       return { kind: "proven_absent" };
     }
-    if (record.surface && !panes.some((pane) => pane.paneId === record.surface) && !match) {
+    if (record.surface && !panes.some((pane) => pane.surface === record.surface) && !match) {
       return { kind: "proven_absent" };
     }
     return { kind: "unknown", reason: "no matching pane in recorded window" };
@@ -292,21 +270,7 @@ export function invokeSplit(
   adapter = getLifecycleAdapter(),
 ): { registry: WorkerRegistry; record: AttemptRecord } {
   try {
-    const paneId = adapter.tmux(
-      tmuxArgs(record.tmuxSocket, [
-        "split-window",
-        "-d",
-        "-P",
-        "-F",
-        "#{pane_id}",
-        "-t",
-        record.windowId,
-        "--",
-        "bash",
-        record.launchScriptFile,
-      ]),
-    );
-    if (!/^%\d+$/.test(paneId)) throw new Error(`Unexpected tmux split-window output: ${paneId}`);
+    const paneId = hostFor(record, adapter).splitLaunch(record.container, record.launchScriptFile);
     const nextRecord: AttemptRecord = {
       ...record,
       surface: paneId,
@@ -319,7 +283,7 @@ export function invokeSplit(
     if (recovered.kind === "adopted") {
       const nextRecord: AttemptRecord = {
         ...record,
-        surface: recovered.pane.paneId,
+        surface: recovered.pane.surface,
         resourceState: "unknown",
       };
       const next = persistRecord(registryPath, registry, nextRecord, adapter);
@@ -336,27 +300,6 @@ export function invokeSplit(
   }
 }
 
-export function currentWindowId(socket: string, pane: string, adapter = getLifecycleAdapter()): string {
-  const windowId = adapter.tmux(tmuxArgs(socket, ["display-message", "-p", "-t", pane, "#{window_id}"]));
-  if (!/^@\d+$/.test(windowId)) throw new Error(`Unexpected window id: ${windowId}`);
-  return windowId;
-}
-
-export function readPaneToken(socket: string, surface: string, adapter = getLifecycleAdapter()): string {
-  return adapter.tmux(tmuxArgs(socket, ["show-options", "-p", "-v", "-t", surface, "@pi-worker-token"]));
-}
-
-export function clearPaneTags(socket: string, surface: string, adapter = getLifecycleAdapter()): void {
-  adapter.tmux(tmuxArgs(socket, ["set-option", "-pu", "-t", surface, "@pi-attempt"]));
-  adapter.tmux(tmuxArgs(socket, ["set-option", "-pu", "-t", surface, "@pi-worker-token"]));
-}
-
-export function killOwnedPane(socket: string, surface: string, token: string, adapter = getLifecycleAdapter()): void {
-  const actual = readPaneToken(socket, surface, adapter);
-  if (actual !== token) throw new Error("Worker pane ownership changed; retaining pane");
-  adapter.tmux(tmuxArgs(socket, ["kill-pane", "-t", surface]));
-}
-
 export function releaseWithoutClose(
   registryPath: string,
   registry: WorkerRegistry,
@@ -364,9 +307,9 @@ export function releaseWithoutClose(
   adapter = getLifecycleAdapter(),
 ): { registry: WorkerRegistry; record: AttemptRecord } {
   if (!record.surface) throw new Error("Cannot release an attempt with no surface");
-  const actual = readPaneToken(record.tmuxSocket, record.surface, adapter);
-  if (actual !== record.completionToken) throw new Error("Worker pane ownership changed; retaining pane");
-  clearPaneTags(record.tmuxSocket, record.surface, adapter);
+  const host = hostFor(record, adapter);
+  if (!host.ownsSurface(record.surface, record.attemptId, record.completionToken)) throw new Error("Worker pane ownership changed; retaining pane");
+  host.clearOwnership(record.surface);
   const nextRecord: AttemptRecord = { ...record, resourceState: "released" };
   const next = persistRecord(registryPath, registry, nextRecord, adapter);
   return { registry: next, record: nextRecord };
@@ -379,14 +322,14 @@ export function closeOwned(
   adapter = getLifecycleAdapter(),
 ): { registry: WorkerRegistry; record: AttemptRecord } {
   if (!record.surface) throw new Error("Cannot close an attempt with no surface");
-  killOwnedPane(record.tmuxSocket, record.surface, record.completionToken, adapter);
+  hostFor(record, adapter).killOwned(record.surface, record.attemptId, record.completionToken);
   const nextRecord: AttemptRecord = { ...record, resourceState: "closed" };
   const next = persistRecord(registryPath, registry, nextRecord, adapter);
   return { registry: next, record: nextRecord };
 }
 
 export function classifySocket(record: AttemptRecord, currentSocket: string | null): "current" | "foreign" {
-  if (!currentSocket || record.tmuxSocket !== currentSocket) return "foreign";
+  if (!currentSocket || record.host.kind !== "tmux" || record.host.id !== currentSocket) return "foreign";
   return "current";
 }
 
@@ -425,7 +368,7 @@ export function applyRecovery(
         : record.resourceState;
     const nextRecord: AttemptRecord = {
       ...record,
-      surface: recovered.pane.paneId,
+      surface: recovered.pane.surface,
       resourceState: nextState,
     };
     const next = persistRecord(registryPath, registry, nextRecord, adapter);
