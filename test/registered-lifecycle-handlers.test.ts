@@ -23,6 +23,7 @@ import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { createDefaultAdapter, setLifecycleAdapter } from "../pi-extension/subagents/adapter.ts";
+import { TmuxWorkerHost } from "../pi-extension/subagents/worker-host.ts";
 import * as subagentsModule from "../pi-extension/subagents/index.ts";
 import { loadRegistry } from "../pi-extension/subagents/registry.ts";
 import {
@@ -706,7 +707,7 @@ describe("registered subagent-release command", () => {
         await commands["subagent-release"].handler("not-a-real-attempt-id", ctx);
         assert.match(notifyErrors.join("\n"), /Unknown attempt/);
 
-        // Foreign-socket record: insert a copy with a different tmuxSocket
+        // Foreign-host record: insert a copy with a different host identity
         // into the ON-DISK registry, then reload through a fresh
         // session_start so the command's module-level workerRegistry
         // actually contains this foreign record (not a hand-mocked object).
@@ -714,7 +715,7 @@ describe("registered subagent-release command", () => {
           ...running.attempt,
           attemptId: randomUUID(),
           completionToken: randomUUID(),
-          tmuxSocket: "/tmp/some-other-unrelated-socket",
+          host: { kind: "tmux", id: "/tmp/some-other-unrelated-socket" },
         };
         const registryPath = registryFileFor(ctx.sessionManager.getSessionDir(), ctx.sessionManager.getSessionId());
         const loaded = loadRegistry(registryPath);
@@ -745,7 +746,7 @@ describe("registered subagents-replay command", () => {
    * Builds a live attempt with a pending/uncertain outcome using the REAL
    * lifecycle helpers (persistPreparingIntent + persistRecord +
    * persistOutcomePending), bypassing tmux entirely -- replay does not touch
-   * tmux, and the tmuxSocket is deliberately a fake path so recovery
+   * tmux, and the host identity is deliberately a fake path so recovery
    * classifies it "foreign" (zero tmux calls), matching the reload scenario
    * this command exists for.
    */
@@ -766,8 +767,8 @@ describe("registered subagents-replay command", () => {
       sessionFile: join(root, "child.jsonl"),
       launchScriptFile: join(root, "launch.sh"),
       completionFile: join(root, "completion.json"),
-      tmuxSocket: "/tmp/pi-replay-fake-socket",
-      windowId: "@0",
+      host: new TmuxWorkerHost("/tmp/pi-replay-fake-socket", adapter),
+      container: "@0",
       requested: { provider: "xai", model: "grok-4.6", thinking: "high" },
       interactive: false,
     }, adapter);
@@ -876,8 +877,8 @@ describe("watchSubagent() real async polling path: failure and diagnostic persis
       sessionFile: join(root, "child.jsonl"),
       launchScriptFile: join(root, "launch.sh"),
       completionFile,
-      tmuxSocket: "/tmp/pi-watcher-fake-socket",
-      windowId: "@0",
+      host: new TmuxWorkerHost("/tmp/pi-watcher-fake-socket", adapter),
+      container: "@0",
       requested: { provider: "xai", model: "grok-4.6", thinking: "high" },
       interactive: false,
     }, adapter);

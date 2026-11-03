@@ -63,6 +63,15 @@ describe("registry v2", () => {
     assert.deepEqual(v2.review.profileCopies, {});
   });
 
+  it("normalizes legacy worker identities in v2 documents", () => {
+    const v2 = { ...freshRegistryV2(), workers: [worker()] };
+    const validated = validateRegistryV2(v2);
+    assert.deepEqual(validated.workers[0].host, { kind: "tmux", id: "/tmp/tmux-test/sock" });
+    assert.equal(validated.workers[0].container, "@0");
+    assert.equal((validated.workers[0] as Record<string, unknown>).tmuxSocket, undefined);
+    assert.equal((validated.workers[0] as Record<string, unknown>).windowId, undefined);
+  });
+
   it("migration is validator-clean; .v1.bak written once; legacy intents abandoned", () => {
     setLifecycleAdapter(createDefaultAdapter());
     const dir = mkdtempSync(join(tmpdir(), "pi-regv2-"));

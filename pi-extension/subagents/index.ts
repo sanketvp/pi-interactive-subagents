@@ -1012,11 +1012,7 @@ function requestSubagentInterrupt(
     };
   }
   try {
-    if (running.attempt) {
-      hostForAttempt(running.attempt).sendEscape(running.surface, running.attempt.attemptId, running.attempt.completionToken);
-    } else {
-      sendEscapeKey(running.surface);
-    }
+    sendEscapeKey(running.surface);
     return { ok: true };
   } catch (error: any) {
     const backend = getMuxBackend() ?? "unknown";

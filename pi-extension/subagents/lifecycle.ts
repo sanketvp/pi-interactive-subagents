@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { getLifecycleAdapter, type LifecycleAdapter } from "./adapter.ts";
-import { TmuxWorkerHost, tmuxSocketFromEnv, type WorkerHost } from "./worker-host.ts";
+import { TmuxWorkerHost, tmuxSocketFromEnv, type WorkerHost, type WorkerSurfaceEvidence } from "./worker-host.ts";
 import {
   type AttemptRecord,
   type DeliveryState,
@@ -104,11 +104,8 @@ export interface BeginAttemptInput {
   sessionFile: string;
   launchScriptFile: string;
   completionFile: string;
-  host?: WorkerHost;
-  container?: string;
-  /** Legacy call fields accepted while callers migrate to WorkerHost. */
-  tmuxSocket?: string;
-  windowId?: string;
+  host: WorkerHost;
+  container: string;
   requested: ModelIdentity;
   interactive: boolean;
   paneStartCommand?: string;
@@ -120,9 +117,7 @@ export function persistPreparingIntent(input: BeginAttemptInput, adapter = getLi
   assertCanLaunch(input.registry);
   assertUniqueSessionWriter(input.registry, input.sessionFile);
   const invocation = input.registry.invocations + 1;
-  const host = input.host ?? (input.tmuxSocket ? new TmuxWorkerHost(input.tmuxSocket, adapter) : null);
-  const container = input.container ?? input.windowId;
-  if (!host || !container) throw new Error("worker host/container identity is required");
+  const { host, container } = input;
   const record: AttemptRecord = {
     attemptId: input.attemptId ?? randomUUID(),
     parentSessionId: input.parentSessionId,
@@ -175,9 +170,7 @@ export interface LaunchScriptInput {
   scriptPath: string;
   attemptId: string;
   token: string;
-  ownershipPreamble?: string;
-  /** Legacy test/caller field accepted while callers migrate to WorkerHost. */
-  socket?: string;
+  ownershipPreamble: string;
   dispatcher: string;
   dispatcherArgs: string[];
   env: Record<string, string>;
@@ -196,11 +189,7 @@ export function writeLaunchScript(input: LaunchScriptInput, adapter = getLifecyc
   if (input.waitFile) {
     lines.push(`while [ ! -f ${bashSingleQuote(input.waitFile)} ]; do sleep 0.05; done`);
   }
-  const ownershipPreamble = input.ownershipPreamble ?? (input.socket
-    ? new TmuxWorkerHost(input.socket, adapter).ownershipPreamble(input.attemptId, input.token)
-    : null);
-  if (!ownershipPreamble) throw new Error("worker-host ownership preamble is required");
-  lines.push(ownershipPreamble);
+  lines.push(input.ownershipPreamble);
   for (const [key, value] of Object.entries(input.env)) {
     lines.push(`export ${key}=${bashSingleQuote(value)}`);
   }
@@ -243,47 +232,32 @@ export function persistSplitRequested(
   return { registry: next, record: nextRecord };
 }
 
-export interface PaneIdentity {
-  paneId: string;
-  paneStartCommand: string;
-  attemptTag: string;
-}
-
 function hostFor(record: AttemptRecord, adapter = getLifecycleAdapter()): WorkerHost {
-  const host = record.host ?? (record.tmuxSocket ? { kind: "tmux" as const, id: record.tmuxSocket } : null);
-  if (!host) throw new Error("Worker host identity is missing");
+  const host = record.host;
   if (adapter.workerHost) return adapter.workerHost(host);
   if (host.kind !== "tmux") throw new Error(`Unsupported worker host: ${host.kind}`);
   return new TmuxWorkerHost(host.id, adapter);
 }
 
-export function listWindowPanes(host: WorkerHost, container: string): PaneIdentity[] {
-  return host.listSurfaces(container).map((surface) => ({
-    paneId: surface.surface,
-    paneStartCommand: surface.launchCommand,
-    attemptTag: surface.attemptTag,
-  }));
-}
-
-export function matchPaneIdentity(record: AttemptRecord, panes: PaneIdentity[]): PaneIdentity | null {
+export function matchPaneIdentity(record: AttemptRecord, panes: WorkerSurfaceEvidence[]): WorkerSurfaceEvidence | null {
   const byAttempt = panes.find((pane) => pane.attemptTag === record.attemptId);
   if (byAttempt) return byAttempt;
-  const byStart = panes.find((pane) => pane.paneStartCommand === record.paneStartCommand);
+  const byStart = panes.find((pane) => pane.launchCommand === record.paneStartCommand);
   return byStart ?? null;
 }
 
 export function recoverSurface(
   record: AttemptRecord,
   adapter = getLifecycleAdapter(),
-): { kind: "adopted"; pane: PaneIdentity } | { kind: "proven_absent" } | { kind: "unknown"; reason: string } {
+): { kind: "adopted"; pane: WorkerSurfaceEvidence } | { kind: "proven_absent" } | { kind: "unknown"; reason: string } {
   try {
-    const panes = listWindowPanes(hostFor(record, adapter), record.container ?? record.windowId!);
+    const panes = hostFor(record, adapter).listSurfaces(record.container);
     const match = matchPaneIdentity(record, panes);
     if (match) return { kind: "adopted", pane: match };
     if (record.resourceState === "split_requested" && record.surface === null) {
       return { kind: "proven_absent" };
     }
-    if (record.surface && !panes.some((pane) => pane.paneId === record.surface) && !match) {
+    if (record.surface && !panes.some((pane) => pane.surface === record.surface) && !match) {
       return { kind: "proven_absent" };
     }
     return { kind: "unknown", reason: "no matching pane in recorded window" };
@@ -299,7 +273,7 @@ export function invokeSplit(
   adapter = getLifecycleAdapter(),
 ): { registry: WorkerRegistry; record: AttemptRecord } {
   try {
-    const paneId = hostFor(record, adapter).splitLaunch(record.container ?? record.windowId!, record.launchScriptFile);
+    const paneId = hostFor(record, adapter).splitLaunch(record.container, record.launchScriptFile);
     const nextRecord: AttemptRecord = {
       ...record,
       surface: paneId,
@@ -312,7 +286,7 @@ export function invokeSplit(
     if (recovered.kind === "adopted") {
       const nextRecord: AttemptRecord = {
         ...record,
-        surface: recovered.pane.paneId,
+        surface: recovered.pane.surface,
         resourceState: "unknown",
       };
       const next = persistRecord(registryPath, registry, nextRecord, adapter);
@@ -358,8 +332,7 @@ export function closeOwned(
 }
 
 export function classifySocket(record: AttemptRecord, currentSocket: string | null): "current" | "foreign" {
-  const host = record.host ?? (record.tmuxSocket ? { kind: "tmux" as const, id: record.tmuxSocket } : null);
-  if (!currentSocket || !host || host.kind !== "tmux" || host.id !== currentSocket) return "foreign";
+  if (!currentSocket || record.host.kind !== "tmux" || record.host.id !== currentSocket) return "foreign";
   return "current";
 }
 
@@ -398,7 +371,7 @@ export function applyRecovery(
         : record.resourceState;
     const nextRecord: AttemptRecord = {
       ...record,
-      surface: recovered.pane.paneId,
+      surface: recovered.pane.surface,
       resourceState: nextState,
     };
     const next = persistRecord(registryPath, registry, nextRecord, adapter);

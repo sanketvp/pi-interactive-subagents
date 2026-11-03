@@ -5,7 +5,7 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {randomUUID} from 'node:crypto';
 import {createDefaultAdapter,setLifecycleAdapter} from '../pi-extension/subagents/adapter.ts';
-import type {WorkerHost} from '../pi-extension/subagents/worker-host.ts';
+import {TmuxWorkerHost, type WorkerHost} from '../pi-extension/subagents/worker-host.ts';
 import {
   persistPreparingIntent,
   persistSplitRequested,
@@ -18,7 +18,7 @@ import {
   matchPaneIdentity,
   writeLaunchScript,
 } from '../pi-extension/subagents/lifecycle.ts';
-import {loadRegistry, validateRegistry} from '../pi-extension/subagents/registry.ts';
+import {loadRegistry, validateRegistry, writeRegistry} from '../pi-extension/subagents/registry.ts';
 import * as subagentsModule from '../pi-extension/subagents/index.ts';
 import {observedFromExtensionContext} from '../pi-extension/subagents/subagent-done.ts';
 
@@ -64,8 +64,8 @@ test('preparing and split_requested persist before tmux; start command is exact'
     sessionFile: join(root, 's.jsonl'),
     launchScriptFile: script,
     completionFile: join(root, 'done.json'),
-    tmuxSocket: '/tmp/tmux-test/sock',
-    windowId: '@0',
+    host: new TmuxWorkerHost('/tmp/tmux-test/sock', adapter),
+    container: '@0',
     requested: { provider: 'xai', model: 'grok-4.6', thinking: 'high' },
     interactive: false,
     paneStartCommand: freezePaneStartCommand(script),
@@ -106,8 +106,8 @@ test('split failure without matching start command on reachable window is proven
     sessionFile: join(root, 's.jsonl'),
     launchScriptFile: script,
     completionFile: join(root, 'done.json'),
-    tmuxSocket: '/tmp/tmux-test/sock',
-    windowId: '@0',
+    host: new TmuxWorkerHost('/tmp/tmux-test/sock', adapter),
+    container: '@0',
     requested: { provider: 'xai', model: 'grok-4.6', thinking: 'high' },
     interactive: false,
     paneStartCommand: freezePaneStartCommand(script),
@@ -125,17 +125,17 @@ test('recovery adopts via exact pane_start_command, never substring', () => {
   const record: any = {
     attemptId: randomUUID(),
     paneStartCommand: `bash ${script}`,
-    tmuxSocket: '/tmp/sock',
-    windowId: '@0',
+    host: { kind: 'tmux', id: '/tmp/sock' },
+    container: '@0',
     surface: null,
     resourceState: 'split_requested',
   };
   const panes = [
-    { paneId: '%1', paneStartCommand: `bash ${script} extra`, attemptTag: '' },
-    { paneId: '%2', paneStartCommand: `bash ${script}`, attemptTag: '' },
+    { surface: '%1', launchCommand: `bash ${script} extra`, attemptTag: '' },
+    { surface: '%2', launchCommand: `bash ${script}`, attemptTag: '' },
   ];
   const match = matchPaneIdentity(record, panes);
-  assert.equal(match?.paneId, '%2');
+  assert.equal(match?.surface, '%2');
 });
 
 test('foreign socket recovery performs zero tmux calls', () => {
@@ -154,8 +154,8 @@ test('foreign socket recovery performs zero tmux calls', () => {
     sessionFile: join(root, 's.jsonl'),
     launchScriptFile: script,
     completionFile: join(root, 'done.json'),
-    tmuxSocket: '/tmp/other-socket',
-    windowId: '@0',
+    host: new TmuxWorkerHost('/tmp/other-socket', adapter),
+    container: '@0',
     requested: { provider: 'xai', model: 'grok-4.6', thinking: 'high' },
     interactive: false,
     paneStartCommand: freezePaneStartCommand(script),
@@ -192,6 +192,28 @@ test('legacy tmuxSocket registry records load as host records and recover as bef
   assert.equal(written.workers[0].tmuxSocket, undefined);
 });
 
+test('modern registry identities take precedence over legacy disk aliases', () => {
+  const root = tempRoot();
+  const record = {
+    attemptId: randomUUID(), parentSessionId: randomUUID(), piSessionId: null, invocation: 1, completionToken: randomUUID(),
+    host: { kind: 'tmux', id: '/tmp/authoritative-socket' }, container: '@1',
+    tmuxSocket: 'relative', windowId: 'garbage', surface: null, sessionFile: join(root, 's.jsonl'),
+    launchScriptFile: join(root, 'launch.sh'), completionFile: join(root, 'done.json'), paneStartCommand: 'bash /tmp/launch.sh',
+    requested: { provider: 'xai', model: 'grok-4.6', thinking: 'high' }, observed: null, resourceState: 'running',
+    outcome: null, outcomeBytes: null, outcomeDigest: null, deliveryState: null, createdAt: 1, name: 'worker', task: 't',
+  };
+  const validated = validateRegistry({ version: 1, invocations: 1, workers: [record] });
+  assert.deepEqual(validated.workers[0].host, record.host);
+  assert.equal(validated.workers[0].container, '@1');
+  assert.equal((validated.workers[0] as Record<string, unknown>).tmuxSocket, undefined);
+  assert.equal((validated.workers[0] as Record<string, unknown>).windowId, undefined);
+  const path = join(root, 'workers.json');
+  writeRegistry(path, 1, [record as any]);
+  const persisted = JSON.parse(readFileSync(path, 'utf8'));
+  assert.deepEqual(persisted.workers[0].host, record.host);
+  assert.equal(persisted.workers[0].container, '@1');
+});
+
 test('lifecycle uses the WorkerHost contract rather than direct tmux operations', () => {
   const root = tempRoot();
   const calls: string[] = [];
@@ -205,7 +227,6 @@ test('lifecycle uses the WorkerHost contract rather than direct tmux operations'
     clearOwnership() { calls.push('clear'); },
     killOwned() { calls.push('kill'); },
     sendEscape() { calls.push('escape'); },
-    readScreen() { calls.push('screen'); return ''; },
   };
   const adapter = { ...createDefaultAdapter(), workerHost: () => host, tmux() { throw new Error('direct tmux call'); }, now: () => 1 };
   const began = persistPreparingIntent({ registryPath: join(root, 'workers.json'), registry: { version: 1, invocations: 0, workers: [] }, name: 'w', task: 't', parentSessionId: randomUUID(), sessionFile: join(root, 's.jsonl'), launchScriptFile: '/tmp/launch.sh', completionFile: join(root, 'done.json'), host, container: '@0', requested: { provider: 'xai', model: 'grok-4.6', thinking: 'high' }, interactive: false }, adapter);
@@ -242,8 +263,8 @@ test('duplicate live session writer is refused', () => {
     sessionFile,
     launchScriptFile: script,
     completionFile: join(root, 'done.json'),
-    tmuxSocket: '/tmp/sock',
-    windowId: '@0',
+    host: new TmuxWorkerHost('/tmp/sock', adapter),
+    container: '@0',
     requested: { provider: 'xai', model: 'grok-4.6', thinking: 'high' },
     interactive: false,
     paneStartCommand: freezePaneStartCommand(script),
@@ -257,8 +278,8 @@ test('duplicate live session writer is refused', () => {
     sessionFile,
     launchScriptFile: join(root, 'b.sh'),
     completionFile: join(root, 'done2.json'),
-    tmuxSocket: '/tmp/sock',
-    windowId: '@0',
+    host: new TmuxWorkerHost('/tmp/sock', adapter),
+    container: '@0',
     requested: { provider: 'xai', model: 'grok-4.6', thinking: 'high' },
     interactive: false,
     paneStartCommand: freezePaneStartCommand(join(root, 'b.sh')),
@@ -323,7 +344,7 @@ test('launch script is argv array with no eval and unique wx path', () => {
     scriptPath: script,
     attemptId: randomUUID(),
     token: randomUUID(),
-    socket: '/tmp/sock',
+    ownershipPreamble: new TmuxWorkerHost('/tmp/sock', adapter).ownershipPreamble('attempt', 'token'),
     dispatcher: '/bin/echo',
     dispatcherArgs: ['--interactive', '--provider', 'xai', '--', '$(touch /tmp/should-not)'],
     env: {
@@ -355,8 +376,8 @@ test('applyRecovery: preparing with no surface is proven_absent with zero tmux c
     sessionFile: join(root, 's.jsonl'),
     launchScriptFile: script,
     completionFile: join(root, 'done.json'),
-    tmuxSocket: '/tmp/tmux-test/sock',
-    windowId: '@0',
+    host: new TmuxWorkerHost('/tmp/tmux-test/sock', adapter),
+    container: '@0',
     requested: { provider: 'xai', model: 'grok-4.6', thinking: 'high' },
     interactive: false,
     paneStartCommand: freezePaneStartCommand(script),
@@ -387,8 +408,8 @@ test('persistPreparingIntent persists expectedPiSessionId; applyStartupReceipt r
     sessionFile: join(root, 's.jsonl'),
     launchScriptFile: script,
     completionFile: join(root, 'done.json'),
-    tmuxSocket: '/tmp/sock',
-    windowId: '@0',
+    host: new TmuxWorkerHost('/tmp/sock', adapter),
+    container: '@0',
     requested: { provider: 'xai', model: 'grok-4.6', thinking: 'high' },
     interactive: true,
     paneStartCommand: freezePaneStartCommand(script),
@@ -427,8 +448,8 @@ test('registry validation enforces UUID identity fields, socket-scoped pane uniq
     piSessionId: null,
     invocation: 1,
     completionToken: randomUUID(),
-    tmuxSocket: '/tmp/sock-a',
-    windowId: '@0',
+    host: { kind: 'tmux', id: '/tmp/sock-a' },
+    container: '@0',
     surface: null,
     sessionFile: '/tmp/s.jsonl',
     launchScriptFile: '/tmp/l.sh',
@@ -452,13 +473,13 @@ test('registry validation enforces UUID identity fields, socket-scoped pane uniq
   assert.throws(() => validateRegistry({ version: 1, invocations: 1, workers: [baseWorker({ piSessionId: 'not-a-uuid' })] }), /piSessionId/);
 
   // Same pane number on two DIFFERENT sockets is legitimate, not a duplicate.
-  const a = baseWorker({ tmuxSocket: '/tmp/sock-a', surface: '%1' });
-  const b = baseWorker({ tmuxSocket: '/tmp/sock-b', surface: '%1' });
+  const a = baseWorker({ host: { kind: 'tmux', id: '/tmp/sock-a' }, surface: '%1' });
+  const b = baseWorker({ host: { kind: 'tmux', id: '/tmp/sock-b' }, surface: '%1' });
   assert.doesNotThrow(() => validateRegistry({ version: 1, invocations: 1, workers: [a, b] }));
 
   // Same pane number on the SAME socket IS a duplicate.
-  const c = baseWorker({ tmuxSocket: '/tmp/sock-a', surface: '%1' });
-  const d = baseWorker({ tmuxSocket: '/tmp/sock-a', surface: '%1' });
+  const c = baseWorker({ host: { kind: 'tmux', id: '/tmp/sock-a' }, surface: '%1' });
+  const d = baseWorker({ host: { kind: 'tmux', id: '/tmp/sock-a' }, surface: '%1' });
   assert.throws(() => validateRegistry({ version: 1, invocations: 1, workers: [c, d] }), /duplicate surface/);
 
   // outcome present but bytes/digest missing or mismatched is rejected.

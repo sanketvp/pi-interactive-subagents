@@ -1,4 +1,5 @@
 import { dirname } from "node:path";
+import type { WorkerHostIdentity } from "./worker-host.ts";
 import { isAbsolute } from "node:path";
 import { randomUUID, createHash } from "node:crypto";
 import { getLifecycleAdapter, type LifecycleFs } from "./adapter.ts";
@@ -86,10 +87,7 @@ export interface ModelIdentity {
   thinking: string;
 }
 
-export interface WorkerHostRecord {
-  kind: "tmux";
-  id: string;
-}
+export type WorkerHostRecord = WorkerHostIdentity;
 
 export interface AttemptRecord {
   attemptId: string;
@@ -100,9 +98,6 @@ export interface AttemptRecord {
   host: WorkerHostRecord;
   container: string;
   surface: string | null;
-  /** Legacy disk fields accepted on read but never written. */
-  tmuxSocket?: string;
-  windowId?: string;
   sessionFile: string;
   launchScriptFile: string;
   completionFile: string;
@@ -198,7 +193,7 @@ function validateAttemptRecord(worker: unknown, index: number): AttemptRecord {
   if (!isUuid(w.completionToken)) fail("completionToken");
   const legacyTmuxSocket = w.tmuxSocket;
   const legacyWindowId = w.windowId;
-  if (w.host === undefined && (!isAbsolutePath(legacyTmuxSocket) || typeof legacyWindowId !== "string" || !WINDOW_RE.test(legacyWindowId))) {
+  if (w.host === undefined && !isAbsolutePath(legacyTmuxSocket)) {
     fail("host");
   }
   if (w.host !== undefined) {
@@ -206,7 +201,8 @@ function validateAttemptRecord(worker: unknown, index: number): AttemptRecord {
     const host = w.host as Record<string, unknown>;
     if (host.kind !== "tmux" || !isAbsolutePath(host.id)) fail("host");
   }
-  if (typeof (w.container ?? legacyWindowId) !== "string" || !WINDOW_RE.test(w.container ?? legacyWindowId)) fail("container");
+  const container = w.container ?? legacyWindowId;
+  if (typeof container !== "string" || !WINDOW_RE.test(container)) fail("container");
   if (w.surface !== null && (typeof w.surface !== "string" || !PANE_RE.test(w.surface))) fail("surface");
   if (!isAbsolutePath(w.sessionFile)) fail("sessionFile");
   if (!isAbsolutePath(w.launchScriptFile)) fail("launchScriptFile");
@@ -244,10 +240,8 @@ function validateAttemptRecord(worker: unknown, index: number): AttemptRecord {
   if (!isNonEmptyString(w.name, 120)) fail("name");
   if (typeof w.task !== "string" || w.task.length > 100_000) fail("task");
   const normalized = { ...w } as Record<string, unknown>;
-  if (legacyTmuxSocket !== undefined) normalized.host = { kind: "tmux", id: legacyTmuxSocket };
-  else if (normalized.host === undefined) normalized.host = { kind: "tmux", id: legacyTmuxSocket };
-  if (legacyWindowId !== undefined) normalized.container = legacyWindowId;
-  else if (normalized.container === undefined) normalized.container = legacyWindowId;
+  if (normalized.host === undefined) normalized.host = { kind: "tmux", id: legacyTmuxSocket };
+  if (normalized.container === undefined) normalized.container = legacyWindowId;
   delete normalized.tmuxSocket;
   delete normalized.windowId;
   return normalized as AttemptRecord;
@@ -335,12 +329,17 @@ export function readRegistry(path: string): WorkerRegistry {
 
 function persistableWorker(worker: AttemptRecord): Record<string, unknown> {
   const record: Record<string, unknown> = {};
+  const legacy = worker as AttemptRecord & { tmuxSocket?: unknown; windowId?: unknown };
   for (const [key, value] of Object.entries(worker)) {
     if (RUNTIME_KEYS.has(key) || key === "tmuxSocket" || key === "windowId") continue;
     record[key] = value;
   }
-  if (worker.tmuxSocket) record.host = { kind: "tmux", id: worker.tmuxSocket };
-  if (worker.windowId) record.container = worker.windowId;
+  if (record.host === undefined && isAbsolutePath(legacy.tmuxSocket)) {
+    record.host = { kind: "tmux", id: legacy.tmuxSocket };
+  }
+  if (record.container === undefined && typeof legacy.windowId === "string" && WINDOW_RE.test(legacy.windowId)) {
+    record.container = legacy.windowId;
+  }
   return record;
 }
 
@@ -697,7 +696,7 @@ export function validateRegistryV2(data: unknown): WorkerRegistryV2 {
     throw new RegistryValidationError(`live resource count exceeds ${MAX_LIVE_RESOURCES}`);
   }
   const review = validateReviewState(raw.review);
-  return data as WorkerRegistryV2;
+  return { ...raw, workers, review } as WorkerRegistryV2;
 }
 
 export function freshRegistryV2(opts?: { gating?: Gating }): WorkerRegistryV2 {
