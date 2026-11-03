@@ -10,6 +10,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { execFileSync } from "node:child_process";
+import type { WorkerHost, WorkerHostIdentity } from "./worker-host.ts";
 
 export type TmuxFn = (args: string[]) => string;
 
@@ -92,6 +93,8 @@ export function createNoopProcAdapter(): ProcAdapter {
 
 export interface LifecycleAdapter {
   tmux: TmuxFn;
+  /** Test/runtime injection seam for backend-neutral lifecycle operations. */
+  workerHost?: (identity: WorkerHostIdentity) => WorkerHost;
   fs: LifecycleFs;
   now: () => number;
   sandbox?: SandboxAdapter;

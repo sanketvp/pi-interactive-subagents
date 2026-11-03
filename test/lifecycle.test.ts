@@ -5,10 +5,12 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {randomUUID} from 'node:crypto';
 import {createDefaultAdapter,setLifecycleAdapter} from '../pi-extension/subagents/adapter.ts';
+import type {WorkerHost} from '../pi-extension/subagents/worker-host.ts';
 import {
   persistPreparingIntent,
   persistSplitRequested,
   invokeSplit,
+  releaseWithoutClose,
   applyRecovery,
   applyStartupReceipt,
   freezePaneStartCommand,
@@ -164,6 +166,55 @@ test('foreign socket recovery performs zero tmux calls', () => {
   assert.equal(calls.length, 0);
   assert.equal(classifySocket(began.record, '/tmp/current-socket'), 'foreign');
   setLifecycleAdapter(null);
+});
+
+test('legacy tmuxSocket registry records load as host records and recover as before', () => {
+  const root = tempRoot();
+  const path = join(root, 'workers.json');
+  const attemptId = randomUUID();
+  const token = randomUUID();
+  writeFileSync(path, JSON.stringify({ version: 1, invocations: 1, workers: [{
+    attemptId, parentSessionId: randomUUID(), piSessionId: null, invocation: 1, completionToken: token,
+    tmuxSocket: '/tmp/legacy-socket', windowId: '@0', surface: '%7', sessionFile: join(root, 's.jsonl'),
+    launchScriptFile: join(root, 'launch.sh'), completionFile: join(root, 'done.json'), paneStartCommand: 'bash /tmp/launch.sh',
+    requested: { provider: 'xai', model: 'grok-4.6', thinking: 'high' }, observed: null, resourceState: 'running',
+    outcome: null, outcomeBytes: null, outcomeDigest: null, deliveryState: null, createdAt: 1, name: 'legacy', task: 't',
+  }] }));
+  const loaded = loadRegistry(path);
+  assert.equal(loaded.status, 'ok');
+  if (loaded.status !== 'ok') return;
+  assert.deepEqual(loaded.registry.workers[0].host, { kind: 'tmux', id: '/tmp/legacy-socket' });
+  assert.equal(loaded.registry.workers[0].container, '@0');
+  const recovered = applyRecovery(path, loaded.registry, loaded.registry.workers[0], '/tmp/current-socket');
+  assert.equal(recovered.record.resourceState, 'foreign');
+  const written = JSON.parse(readFileSync(path, 'utf8'));
+  assert.deepEqual(written.workers[0].host, { kind: 'tmux', id: '/tmp/legacy-socket' });
+  assert.equal(written.workers[0].tmuxSocket, undefined);
+});
+
+test('lifecycle uses the WorkerHost contract rather than direct tmux operations', () => {
+  const root = tempRoot();
+  const calls: string[] = [];
+  const host: WorkerHost = {
+    identity: { kind: 'tmux', id: '/tmp/mock-host' },
+    currentContainer() { calls.push('container'); return '@0'; },
+    splitLaunch() { calls.push('split'); return '%9'; },
+    listSurfaces() { calls.push('list'); return [{ surface: '%9', launchCommand: 'bash /tmp/launch.sh', attemptTag: '' }]; },
+    ownsSurface() { calls.push('owns'); return true; },
+    ownershipPreamble() { return 'true'; },
+    clearOwnership() { calls.push('clear'); },
+    killOwned() { calls.push('kill'); },
+    sendEscape() { calls.push('escape'); },
+    readScreen() { calls.push('screen'); return ''; },
+  };
+  const adapter = { ...createDefaultAdapter(), workerHost: () => host, tmux() { throw new Error('direct tmux call'); }, now: () => 1 };
+  const began = persistPreparingIntent({ registryPath: join(root, 'workers.json'), registry: { version: 1, invocations: 0, workers: [] }, name: 'w', task: 't', parentSessionId: randomUUID(), sessionFile: join(root, 's.jsonl'), launchScriptFile: '/tmp/launch.sh', completionFile: join(root, 'done.json'), host, container: '@0', requested: { provider: 'xai', model: 'grok-4.6', thinking: 'high' }, interactive: false }, adapter);
+  const split = persistSplitRequested(join(root, 'workers.json'), began.registry, began.record, began.record.paneStartCommand, adapter);
+  const launched = invokeSplit(join(root, 'workers.json'), split.registry, split.record, adapter);
+  assert.equal(launched.record.surface, '%9');
+  const released = releaseWithoutClose(join(root, 'workers.json'), launched.registry, launched.record, adapter);
+  assert.equal(released.record.resourceState, 'released');
+  assert.deepEqual(calls, ['split', 'owns', 'clear']);
 });
 
 test('corrupt registry load leaves bytes untouched', () => {

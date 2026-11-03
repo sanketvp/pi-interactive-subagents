@@ -21,7 +21,6 @@ import {
   classifySocket,
   closeOwned,
   currentTmuxSocket,
-  currentWindowId,
   diagnoseText,
   dispatcherPath,
   freezePaneStartCommand,
@@ -34,13 +33,13 @@ import {
   persistRecord,
   persistRegistry,
   persistSplitRequested,
-  readPaneToken,
   readSessionHeaderId,
   recoverSurface,
   releaseWithoutClose,
   requestedObservedMismatch,
   writeLaunchScript,
 } from "./lifecycle.ts";
+import { TmuxWorkerHost, currentWorkerHost, type WorkerHost } from "./worker-host.ts";
 import { getLifecycleAdapter, setLifecycleAdapter } from "./adapter.ts";
 import {
   validateCompletion,
@@ -601,6 +600,7 @@ interface RunningSubagent {
   launchScriptFile?: string;
   completionFile?: string;
   completionToken?: string;
+  /** Legacy runtime mirror retained for interrupt compatibility. */
   tmuxSocket?: string;
   activityFile?: string;
   activity?: SubagentActivityState;
@@ -980,10 +980,10 @@ function resolveInterruptTarget(params: { id?: string; name?: string }):
 function isExactOwnedSurface(running: RunningSubagent): boolean {
   const surface = running.surface;
   if (!surface || !/^%\d+$/.test(surface)) return false;
-  const socket = running.attempt?.tmuxSocket ?? running.tmuxSocket;
-  if (!socket) return false;
-  const current = currentTmuxSocket();
-  if (!current || socket !== current) return false;
+  const host = running.attempt
+    ? hostForAttempt(running.attempt)
+    : (running.tmuxSocket ? new TmuxWorkerHost(running.tmuxSocket, getLifecycleAdapter()) : null);
+  if (!host || host.identity.id !== currentTmuxSocket()) return false;
   // `%N` format + matching socket alone is NOT proof of current ownership:
   // tmux pane ids can be reused/collide across separate tmux server
   // processes bound to the same socket path over time, and a stale/foreign
@@ -994,7 +994,7 @@ function isExactOwnedSurface(running: RunningSubagent): boolean {
   const token = running.attempt?.completionToken ?? running.completionToken;
   if (!token) return false;
   try {
-    return readPaneToken(socket, surface, getLifecycleAdapter()) === token;
+    return host.ownsSurface(surface, running.attempt?.attemptId ?? "", token);
   } catch {
     return false;
   }
@@ -1012,7 +1012,11 @@ function requestSubagentInterrupt(
     };
   }
   try {
-    sendEscapeKey(running.surface);
+    if (running.attempt) {
+      hostForAttempt(running.attempt).sendEscape(running.surface, running.attempt.attemptId, running.attempt.completionToken);
+    } else {
+      sendEscapeKey(running.surface);
+    }
     return { ok: true };
   } catch (error: any) {
     const backend = getMuxBackend() ?? "unknown";
@@ -1274,6 +1278,13 @@ function buildDispatcherArgs(options: {
   return args;
 }
 
+function hostForAttempt(record: AttemptRecord): WorkerHost {
+  const adapter = getLifecycleAdapter();
+  if (adapter.workerHost) return adapter.workerHost(record.host);
+  if (record.host.kind !== "tmux") throw new Error(`Unsupported worker host: ${record.host.kind}`);
+  return new TmuxWorkerHost(record.host.id, adapter);
+}
+
 function runningFromAttempt(
   record: AttemptRecord,
   extras: Partial<RunningSubagent> = {},
@@ -1289,7 +1300,7 @@ function runningFromAttempt(
     launchScriptFile: record.launchScriptFile,
     completionFile: record.completionFile,
     completionToken: record.completionToken,
-    tmuxSocket: record.tmuxSocket,
+    tmuxSocket: record.host.id,
     interactive: !!record.interactive,
     statusState: createStatusState({ source: "pi", startTimeMs: record.createdAt }),
     attempt: record,
@@ -1304,7 +1315,7 @@ function syncAttempt(running: RunningSubagent, record: AttemptRecord): void {
   running.sessionFile = record.sessionFile;
   running.completionFile = record.completionFile;
   running.completionToken = record.completionToken;
-  running.tmuxSocket = record.tmuxSocket;
+  running.tmuxSocket = record.host.id;
 }
 
 function commitRegistry(next: WorkerRegistry, record?: AttemptRecord, running?: RunningSubagent): void {
@@ -1392,10 +1403,10 @@ async function launchSubagentImpl(
   const effectiveInteractive = resolveEffectiveInteractive(params, agentDefs);
   const requested = requestedIdentity(params, agentDefs, ctx);
   const adapter = getLifecycleAdapter();
-  const tmuxSocket = currentTmuxSocket();
+  const host = currentWorkerHost(process.env, adapter);
   const parentPane = process.env.TMUX_PANE;
-  if (!tmuxSocket || !parentPane) throw new Error("tmux socket/window identity is required");
-  const windowId = currentWindowId(tmuxSocket, parentPane, adapter);
+  if (!host || !parentPane) throw new Error("tmux socket/window identity is required");
+  const container = host.currentContainer(parentPane);
 
   const sessionFile = ctx.sessionManager.getSessionFile();
   if (!sessionFile) throw new Error("No session file");
@@ -1497,8 +1508,8 @@ async function launchSubagentImpl(
     sessionFile: subagentSessionFile,
     launchScriptFile,
     completionFile,
-    tmuxSocket,
-    windowId,
+    host,
+    container,
     requested,
     interactive: effectiveInteractive,
     paneStartCommand: freezePaneStartCommand(launchScriptFile),
@@ -1533,7 +1544,7 @@ async function launchSubagentImpl(
     scriptPath: launchScriptFile,
     attemptId: began.record.attemptId,
     token: began.record.completionToken,
-    socket: tmuxSocket,
+    ownershipPreamble: host.ownershipPreamble(began.record.attemptId, began.record.completionToken),
     dispatcher: dispatcherPath(),
     dispatcherArgs,
     env,
@@ -2299,10 +2310,10 @@ export default function subagentsExtension(pi: ExtensionAPI) {
           };
         }
         const adapter = getLifecycleAdapter();
-        const tmuxSocket = currentTmuxSocket();
+        const host = currentWorkerHost(process.env, adapter);
         const parentPane = process.env.TMUX_PANE;
-        if (!tmuxSocket || !parentPane) throw new Error("tmux socket/window identity is required");
-        const windowId = currentWindowId(tmuxSocket, parentPane, adapter);
+        if (!host || !parentPane) throw new Error("tmux socket/window identity is required");
+        const container = host.currentContainer(parentPane);
         const canonicalSession = canonicalizeSessionFile(params.sessionPath, adapter);
         const expectedPiSessionId = readSessionHeaderId(canonicalSession, adapter);
         const parentSessionId = ctx.sessionManager.getSessionId();
@@ -2343,8 +2354,8 @@ export default function subagentsExtension(pi: ExtensionAPI) {
           sessionFile: canonicalSession,
           launchScriptFile,
           completionFile,
-          tmuxSocket,
-          windowId,
+          host,
+          container,
           requested,
           interactive,
           paneStartCommand: freezePaneStartCommand(launchScriptFile),
@@ -2374,7 +2385,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
           scriptPath: launchScriptFile,
           attemptId: began.record.attemptId,
           token: began.record.completionToken,
-          socket: tmuxSocket,
+          ownershipPreamble: host.ownershipPreamble(began.record.attemptId, began.record.completionToken),
           dispatcher: dispatcherPath(),
           dispatcherArgs,
           env,

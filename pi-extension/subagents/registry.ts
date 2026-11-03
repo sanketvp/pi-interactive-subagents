@@ -86,15 +86,23 @@ export interface ModelIdentity {
   thinking: string;
 }
 
+export interface WorkerHostRecord {
+  kind: "tmux";
+  id: string;
+}
+
 export interface AttemptRecord {
   attemptId: string;
   parentSessionId: string;
   piSessionId: string | null;
   invocation: number;
   completionToken: string;
-  tmuxSocket: string;
-  windowId: string;
+  host: WorkerHostRecord;
+  container: string;
   surface: string | null;
+  /** Legacy disk fields accepted on read but never written. */
+  tmuxSocket?: string;
+  windowId?: string;
   sessionFile: string;
   launchScriptFile: string;
   completionFile: string;
@@ -188,8 +196,17 @@ function validateAttemptRecord(worker: unknown, index: number): AttemptRecord {
     fail("invocation");
   }
   if (!isUuid(w.completionToken)) fail("completionToken");
-  if (!isAbsolutePath(w.tmuxSocket)) fail("tmuxSocket");
-  if (typeof w.windowId !== "string" || !WINDOW_RE.test(w.windowId)) fail("windowId");
+  const legacyTmuxSocket = w.tmuxSocket;
+  const legacyWindowId = w.windowId;
+  if (w.host === undefined && (!isAbsolutePath(legacyTmuxSocket) || typeof legacyWindowId !== "string" || !WINDOW_RE.test(legacyWindowId))) {
+    fail("host");
+  }
+  if (w.host !== undefined) {
+    if (!w.host || typeof w.host !== "object") fail("host");
+    const host = w.host as Record<string, unknown>;
+    if (host.kind !== "tmux" || !isAbsolutePath(host.id)) fail("host");
+  }
+  if (typeof (w.container ?? legacyWindowId) !== "string" || !WINDOW_RE.test(w.container ?? legacyWindowId)) fail("container");
   if (w.surface !== null && (typeof w.surface !== "string" || !PANE_RE.test(w.surface))) fail("surface");
   if (!isAbsolutePath(w.sessionFile)) fail("sessionFile");
   if (!isAbsolutePath(w.launchScriptFile)) fail("launchScriptFile");
@@ -226,7 +243,14 @@ function validateAttemptRecord(worker: unknown, index: number): AttemptRecord {
   if (!Number.isInteger(w.createdAt) || (w.createdAt as number) < 0) fail("createdAt");
   if (!isNonEmptyString(w.name, 120)) fail("name");
   if (typeof w.task !== "string" || w.task.length > 100_000) fail("task");
-  return worker as AttemptRecord;
+  const normalized = { ...w } as Record<string, unknown>;
+  if (legacyTmuxSocket !== undefined) normalized.host = { kind: "tmux", id: legacyTmuxSocket };
+  else if (normalized.host === undefined) normalized.host = { kind: "tmux", id: legacyTmuxSocket };
+  if (legacyWindowId !== undefined) normalized.container = legacyWindowId;
+  else if (normalized.container === undefined) normalized.container = legacyWindowId;
+  delete normalized.tmuxSocket;
+  delete normalized.windowId;
+  return normalized as AttemptRecord;
 }
 
 export function validateRegistry(data: unknown): WorkerRegistry {
@@ -244,9 +268,8 @@ export function validateRegistry(data: unknown): WorkerRegistry {
   const workers = raw.workers.map((worker, index) => validateAttemptRecord(worker, index));
   const attemptIds = new Set<string>();
   const tokens = new Set<string>();
-  // Pane uniqueness is keyed by (tmuxSocket, surface), NOT surface alone: the
-  // same pane number (e.g. `%1`) legitimately exists on two different tmux
-  // sockets simultaneously and must not collide.
+  // Surface uniqueness is keyed by host and surface, not surface alone: the
+  // same surface identifier can legitimately exist on two host instances.
   const surfaces = new Set<string>();
   for (const worker of workers) {
     if (attemptIds.has(worker.attemptId)) throw new RegistryValidationError(`duplicate attemptId ${worker.attemptId}`);
@@ -254,15 +277,15 @@ export function validateRegistry(data: unknown): WorkerRegistry {
     if (tokens.has(worker.completionToken)) throw new RegistryValidationError(`duplicate completionToken`);
     tokens.add(worker.completionToken);
     if (worker.surface) {
-      const key = `${worker.tmuxSocket}::${worker.surface}`;
-      if (surfaces.has(key)) throw new RegistryValidationError(`duplicate surface ${worker.surface} on socket ${worker.tmuxSocket}`);
+      const key = `${worker.host.kind}:${worker.host.id}::${worker.surface}`;
+      if (surfaces.has(key)) throw new RegistryValidationError(`duplicate surface ${worker.surface} on host ${worker.host.id}`);
       surfaces.add(key);
     }
   }
   if (countLiveResources(workers) > MAX_LIVE_RESOURCES) {
     throw new RegistryValidationError(`live resource count exceeds ${MAX_LIVE_RESOURCES}`);
   }
-  return data as WorkerRegistry;
+  return { ...raw, workers } as WorkerRegistry;
 }
 
 export function countLiveResources(workers: AttemptRecord[]): number {
@@ -313,9 +336,11 @@ export function readRegistry(path: string): WorkerRegistry {
 function persistableWorker(worker: AttemptRecord): Record<string, unknown> {
   const record: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(worker)) {
-    if (RUNTIME_KEYS.has(key)) continue;
+    if (RUNTIME_KEYS.has(key) || key === "tmuxSocket" || key === "windowId") continue;
     record[key] = value;
   }
+  if (worker.tmuxSocket) record.host = { kind: "tmux", id: worker.tmuxSocket };
+  if (worker.windowId) record.container = worker.windowId;
   return record;
 }
 
@@ -663,8 +688,8 @@ export function validateRegistryV2(data: unknown): WorkerRegistryV2 {
     if (tokens.has(w.completionToken)) throw new RegistryValidationError(`duplicate completionToken`);
     tokens.add(w.completionToken);
     if (w.surface) {
-      const key = `${w.tmuxSocket}::${w.surface}`;
-      if (surfaces.has(key)) throw new RegistryValidationError(`duplicate surface ${w.surface} on socket ${w.tmuxSocket}`);
+      const key = `${w.host.kind}:${w.host.id}::${w.surface}`;
+      if (surfaces.has(key)) throw new RegistryValidationError(`duplicate surface ${w.surface} on host ${w.host.id}`);
       surfaces.add(key);
     }
   }
