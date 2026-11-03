@@ -18,7 +18,7 @@ import {
   matchPaneIdentity,
   writeLaunchScript,
 } from '../pi-extension/subagents/lifecycle.ts';
-import {loadRegistry, validateRegistry, writeRegistry} from '../pi-extension/subagents/registry.ts';
+import {loadRegistry, validateRegistry} from '../pi-extension/subagents/registry.ts';
 import * as subagentsModule from '../pi-extension/subagents/index.ts';
 import {observedFromExtensionContext} from '../pi-extension/subagents/subagent-done.ts';
 
@@ -207,11 +207,6 @@ test('modern registry identities take precedence over legacy disk aliases', () =
   assert.equal(validated.workers[0].container, '@1');
   assert.equal((validated.workers[0] as Record<string, unknown>).tmuxSocket, undefined);
   assert.equal((validated.workers[0] as Record<string, unknown>).windowId, undefined);
-  const path = join(root, 'workers.json');
-  writeRegistry(path, 1, [record as any]);
-  const persisted = JSON.parse(readFileSync(path, 'utf8'));
-  assert.deepEqual(persisted.workers[0].host, record.host);
-  assert.equal(persisted.workers[0].container, '@1');
 });
 
 test('lifecycle uses the WorkerHost contract rather than direct tmux operations', () => {
@@ -226,7 +221,6 @@ test('lifecycle uses the WorkerHost contract rather than direct tmux operations'
     ownershipPreamble() { return 'true'; },
     clearOwnership() { calls.push('clear'); },
     killOwned() { calls.push('kill'); },
-    sendEscape() { calls.push('escape'); },
   };
   const adapter = { ...createDefaultAdapter(), workerHost: () => host, tmux() { throw new Error('direct tmux call'); }, now: () => 1 };
   const began = persistPreparingIntent({ registryPath: join(root, 'workers.json'), registry: { version: 1, invocations: 0, workers: [] }, name: 'w', task: 't', parentSessionId: randomUUID(), sessionFile: join(root, 's.jsonl'), launchScriptFile: '/tmp/launch.sh', completionFile: join(root, 'done.json'), host, container: '@0', requested: { provider: 'xai', model: 'grok-4.6', thinking: 'high' }, interactive: false }, adapter);

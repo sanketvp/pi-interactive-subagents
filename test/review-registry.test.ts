@@ -25,8 +25,8 @@ function worker(overrides: Record<string, unknown> = {}) {
     piSessionId: null,
     invocation: 1,
     completionToken: randomUUID(),
-    tmuxSocket: "/tmp/tmux-test/sock",
-    windowId: "@0",
+    host: { kind: "tmux", id: "/tmp/tmux-test/sock" },
+    container: "@0",
     surface: "%1",
     sessionFile: join(root, "session.jsonl"),
     launchScriptFile: join(root, "launch.sh"),
@@ -64,7 +64,12 @@ describe("registry v2", () => {
   });
 
   it("normalizes legacy worker identities in v2 documents", () => {
-    const v2 = { ...freshRegistryV2(), workers: [worker()] };
+    const legacyWorker = worker() as Record<string, unknown>;
+    delete legacyWorker.host;
+    delete legacyWorker.container;
+    legacyWorker.tmuxSocket = "/tmp/tmux-test/sock";
+    legacyWorker.windowId = "@0";
+    const v2 = { ...freshRegistryV2(), workers: [legacyWorker] };
     const validated = validateRegistryV2(v2);
     assert.deepEqual(validated.workers[0].host, { kind: "tmux", id: "/tmp/tmux-test/sock" });
     assert.equal(validated.workers[0].container, "@0");

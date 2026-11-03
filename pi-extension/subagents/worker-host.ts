@@ -20,7 +20,6 @@ export interface WorkerHost {
   ownershipPreamble(attemptId: string, token: string): string;
   clearOwnership(surface: string): void;
   killOwned(surface: string, attemptId: string, token: string): void;
-  sendEscape(surface: string, attemptId: string, token: string): void;
 }
 
 function tmuxArgs(socket: string, args: string[]): string[] {
@@ -87,11 +86,6 @@ export class TmuxWorkerHost implements WorkerHost {
   killOwned(surface: string, attemptId: string, token: string): void {
     if (!this.ownsSurface(surface, attemptId, token)) throw new Error("Worker pane ownership changed; retaining pane");
     this.tmux(["kill-pane", "-t", surface]);
-  }
-
-  sendEscape(surface: string, attemptId: string, token: string): void {
-    if (!this.ownsSurface(surface, attemptId, token)) throw new Error("Worker pane ownership changed; retaining pane");
-    this.tmux(["send-keys", "-t", surface, "Escape"]);
   }
 
   private tmux(args: string[]): string {

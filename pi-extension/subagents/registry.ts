@@ -329,16 +329,9 @@ export function readRegistry(path: string): WorkerRegistry {
 
 function persistableWorker(worker: AttemptRecord): Record<string, unknown> {
   const record: Record<string, unknown> = {};
-  const legacy = worker as AttemptRecord & { tmuxSocket?: unknown; windowId?: unknown };
   for (const [key, value] of Object.entries(worker)) {
-    if (RUNTIME_KEYS.has(key) || key === "tmuxSocket" || key === "windowId") continue;
+    if (RUNTIME_KEYS.has(key)) continue;
     record[key] = value;
-  }
-  if (record.host === undefined && isAbsolutePath(legacy.tmuxSocket)) {
-    record.host = { kind: "tmux", id: legacy.tmuxSocket };
-  }
-  if (record.container === undefined && typeof legacy.windowId === "string" && WINDOW_RE.test(legacy.windowId)) {
-    record.container = legacy.windowId;
   }
   return record;
 }
