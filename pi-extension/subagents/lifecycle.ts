@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { getLifecycleAdapter, type LifecycleAdapter } from "./adapter.ts";
-import { TmuxWorkerHost, type WorkerHost, type WorkerSurfaceEvidence } from "./worker-host.ts";
+import { HerdrWorkerHost, TmuxWorkerHost, type WorkerHost, type WorkerHostIdentity, type WorkerSurfaceEvidence, type WorkerHostLaunchOptions } from "./worker-host.ts";
 import {
   type AttemptRecord,
   type DeliveryState,
@@ -103,6 +103,7 @@ export interface BeginAttemptInput {
   completionFile: string;
   host: WorkerHost;
   container: string;
+  hostLaunch?: WorkerHostLaunchOptions;
   requested: ModelIdentity;
   interactive: boolean;
   paneStartCommand?: string;
@@ -123,6 +124,7 @@ export function persistPreparingIntent(input: BeginAttemptInput, adapter = getLi
     completionToken: input.completionToken ?? randomUUID(),
     host: host.identity,
     container,
+    hostLaunch: input.hostLaunch,
     surface: null,
     sessionFile: input.sessionFile,
     launchScriptFile: input.launchScriptFile,
@@ -232,8 +234,9 @@ export function persistSplitRequested(
 function hostFor(record: AttemptRecord, adapter = getLifecycleAdapter()): WorkerHost {
   const host = record.host;
   if (adapter.workerHost) return adapter.workerHost(host);
-  if (host.kind !== "tmux") throw new Error(`Unsupported worker host: ${host.kind}`);
-  return new TmuxWorkerHost(host.id, adapter);
+  if (host.kind === "tmux") return new TmuxWorkerHost(host.id, adapter);
+  if (host.kind === "herdr") return new HerdrWorkerHost(host.id, null, host.terminalId, adapter);
+  throw new Error(`Unsupported worker host: ${(host as { kind: string }).kind}`);
 }
 
 export function matchPaneIdentity(record: AttemptRecord, panes: WorkerSurfaceEvidence[]): WorkerSurfaceEvidence | null {
@@ -248,7 +251,20 @@ export function recoverSurface(
   adapter = getLifecycleAdapter(),
 ): { kind: "adopted"; pane: WorkerSurfaceEvidence } | { kind: "proven_absent" } | { kind: "unknown"; reason: string } {
   try {
-    const panes = hostFor(record, adapter).listSurfaces(record.container);
+    const host = hostFor(record, adapter);
+    const panes = host.listSurfaces(record.container);
+    if (record.host.kind === "herdr") {
+      const live = record.surface ? panes.find((pane) => pane.surface === record.surface) : undefined;
+      if (!live) {
+        return { kind: "proven_absent" };
+      }
+      // Herdr IDs are only a locator.  A live pane is adopted only when its
+      // captured terminal_id and exact foreground bash argv still prove it.
+      if (host.ownsSurface(live.surface, record.attemptId, record.completionToken, record.launchScriptFile)) {
+        return { kind: "adopted", pane: live };
+      }
+      return { kind: "unknown", reason: "Herdr pane no longer proves ownership" };
+    }
     const match = matchPaneIdentity(record, panes);
     if (match) return { kind: "adopted", pane: match };
     if (record.resourceState === "split_requested" && record.surface === null) {
@@ -270,10 +286,22 @@ export function invokeSplit(
   adapter = getLifecycleAdapter(),
 ): { registry: WorkerRegistry; record: AttemptRecord } {
   try {
-    const paneId = hostFor(record, adapter).splitLaunch(record.container, record.launchScriptFile);
+    const split = hostFor(record, adapter).splitLaunch(record.container, record.launchScriptFile, record.hostLaunch);
+    // Accept the H1 string result from injected legacy test hosts while native
+    // hosts return the evidence required to persist Herdr's terminal identity.
+    const evidence: WorkerSurfaceEvidence = typeof split === "string"
+      ? { surface: split, launchCommand: record.paneStartCommand, attemptTag: "" }
+      : split;
+    if (record.host.kind === "herdr" && !evidence.terminalId) {
+      throw new Error("Herdr split did not return a terminal identity");
+    }
+    const host = record.host.kind === "herdr"
+      ? { ...record.host, terminalId: evidence.terminalId }
+      : record.host;
     const nextRecord: AttemptRecord = {
       ...record,
-      surface: paneId,
+      host,
+      surface: evidence.surface,
       resourceState: "launching",
     };
     const next = persistRecord(registryPath, registry, nextRecord, adapter);
@@ -308,7 +336,7 @@ export function releaseWithoutClose(
 ): { registry: WorkerRegistry; record: AttemptRecord } {
   if (!record.surface) throw new Error("Cannot release an attempt with no surface");
   const host = hostFor(record, adapter);
-  if (!host.ownsSurface(record.surface, record.attemptId, record.completionToken)) throw new Error("Worker pane ownership changed; retaining pane");
+  if (!host.ownsSurface(record.surface, record.attemptId, record.completionToken, record.launchScriptFile)) throw new Error("Worker pane ownership changed; retaining pane");
   host.clearOwnership(record.surface);
   const nextRecord: AttemptRecord = { ...record, resourceState: "released" };
   const next = persistRecord(registryPath, registry, nextRecord, adapter);
@@ -322,7 +350,7 @@ export function closeOwned(
   adapter = getLifecycleAdapter(),
 ): { registry: WorkerRegistry; record: AttemptRecord } {
   if (!record.surface) throw new Error("Cannot close an attempt with no surface");
-  hostFor(record, adapter).killOwned(record.surface, record.attemptId, record.completionToken);
+  hostFor(record, adapter).killOwned(record.surface, record.attemptId, record.completionToken, record.launchScriptFile);
   const nextRecord: AttemptRecord = { ...record, resourceState: "closed" };
   const next = persistRecord(registryPath, registry, nextRecord, adapter);
   return { registry: next, record: nextRecord };
@@ -333,14 +361,22 @@ export function classifySocket(record: AttemptRecord, currentSocket: string | nu
   return "current";
 }
 
+export function classifyHost(record: AttemptRecord, currentHost: WorkerHostIdentity | null): "current" | "foreign" {
+  if (!currentHost || record.host.kind !== currentHost.kind || record.host.id !== currentHost.id) return "foreign";
+  return "current";
+}
+
 export function applyRecovery(
   registryPath: string,
   registry: WorkerRegistry,
   record: AttemptRecord,
-  currentSocket: string | null,
+  currentHost: WorkerHostIdentity | string | null,
   adapter = getLifecycleAdapter(),
 ): { registry: WorkerRegistry; record: AttemptRecord; tmuxCalls: boolean } {
-  if (classifySocket(record, currentSocket) === "foreign") {
+  const identity = typeof currentHost === "string"
+    ? { kind: "tmux", id: currentHost } as WorkerHostIdentity
+    : currentHost;
+  if (classifyHost(record, identity) === "foreign") {
     if (!LIVE_RESOURCE_STATES.has(record.resourceState)) return { registry, record, tmuxCalls: false };
     if (record.resourceState === "foreign") return { registry, record, tmuxCalls: false };
     const nextRecord: AttemptRecord = { ...record, resourceState: "foreign" };
@@ -381,7 +417,9 @@ export function applyRecovery(
   }
   const nextRecord: AttemptRecord = {
     ...record,
-    resourceState: record.resourceState === "preparing" ? "unknown" : record.resourceState === "split_requested" ? "unknown" : record.resourceState,
+    resourceState: record.host.kind === "herdr" || record.resourceState === "preparing" || record.resourceState === "split_requested"
+      ? "unknown"
+      : record.resourceState,
   };
   if (nextRecord.resourceState === record.resourceState && nextRecord.surface === record.surface) {
     return { registry, record, tmuxCalls: true };

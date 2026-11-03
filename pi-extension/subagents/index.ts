@@ -18,7 +18,7 @@ import {
   assertCanLaunch,
   canAutoClose,
   canonicalizeSessionFile,
-  classifySocket,
+  classifyHost,
   closeOwned,
   diagnoseText,
   dispatcherPath,
@@ -38,7 +38,7 @@ import {
   requestedObservedMismatch,
   writeLaunchScript,
 } from "./lifecycle.ts";
-import { TmuxWorkerHost, currentWorkerHost, tmuxSocketFromEnv, type WorkerHost } from "./worker-host.ts";
+import { HerdrWorkerHost, TmuxWorkerHost, currentWorkerHost, type WorkerHost, type WorkerHostIdentity } from "./worker-host.ts";
 import { getLifecycleAdapter, setLifecycleAdapter } from "./adapter.ts";
 import {
   validateCompletion,
@@ -58,18 +58,9 @@ import {
 import { homedir } from "node:os";
 import {
   isMuxAvailable,
-  muxSetupHint,
-  createSurface,
-  sendLongCommand,
-  pollForExit,
-  closeSurface as closeMuxSurface,
-  claimSurface,
-  getMuxBackend,
   sendEscape,
-  shellEscape,
   renameCurrentTab,
   renameWorkspace,
-  readScreen,
 } from "./cmux.ts";
 
 import {
@@ -500,11 +491,15 @@ function muxUnavailableResult() {
     content: [
       {
         type: "text" as const,
-        text: `Subagents require a supported terminal multiplexer. ${muxSetupHint()}`,
+        text: "Subagents require tmux or Herdr. Start Pi inside one of those worker hosts.",
       },
     ],
-    details: { error: "mux not available" },
+    details: { error: "worker host unavailable" },
   };
+}
+
+function currentWorkerHostIdentity(): WorkerHostIdentity | null {
+  return currentWorkerHost(process.env, getLifecycleAdapter())?.identity ?? null;
 }
 
 /**
@@ -974,46 +969,46 @@ function resolveInterruptTarget(params: { id?: string; name?: string }):
  * string target on tmux's `send-keys` falls back to the default/active
  * pane, which could hit an unrelated pane.
  */
-function isExactOwnedSurface(running: RunningSubagent): boolean {
+function ownedWorkerHost(running: RunningSubagent): WorkerHost | null {
   const surface = running.surface;
-  if (!surface || !/^%\d+$/.test(surface)) return false;
   const attempt = running.attempt;
-  if (!attempt) return false;
+  if (!surface || !attempt) return null;
+  const current = currentWorkerHostIdentity();
+  if (classifyHost(attempt, current) === "foreign") return null;
   const host = hostForAttempt(attempt);
-  if (host.identity.id !== tmuxSocketFromEnv()) return false;
-  // `%N` format + matching socket alone is NOT proof of current ownership:
-  // tmux pane ids can be reused/collide across separate tmux server
-  // processes bound to the same socket path over time, and a stale/foreign
-  // record could otherwise target a pane that is no longer (or never was)
-  // this attempt's pane. Require the pane's live @pi-worker-token tag to
-  // match the record's completionToken -- the same ownership proof already
-  // required before releasing or closing a pane.
   try {
-    return host.ownsSurface(surface, attempt.attemptId, attempt.completionToken);
+    return host.ownsSurface(surface, attempt.attemptId, attempt.completionToken, attempt.launchScriptFile)
+      ? host
+      : null;
   } catch {
-    return false;
+    return null;
   }
+}
+
+function isExactOwnedSurface(running: RunningSubagent): boolean {
+  return !!ownedWorkerHost(running);
 }
 
 function requestSubagentInterrupt(
   running: RunningSubagent,
   sendEscapeKey: (surface: string) => void = sendEscape,
 ): { ok: true } | { error: string } {
-  if (!isExactOwnedSurface(running)) {
+  const host = ownedWorkerHost(running);
+  if (!host) {
     return {
       error:
-        `Refusing to interrupt subagent "${running.name}": no exact owned tmux surface on the ` +
-        `current socket (surface=${JSON.stringify(running.surface)}). No tmux command was issued.`,
+        `Refusing to interrupt subagent "${running.name}": no exact owned worker surface on the ` +
+        `current host (surface=${JSON.stringify(running.surface)}). No host command was issued.`,
     };
   }
   try {
-    sendEscapeKey(running.surface);
+    if (host.identity.kind === "tmux") sendEscapeKey(running.surface);
+    else host.interruptOwned(running.surface, running.attempt!.attemptId, running.attempt!.completionToken, running.attempt!.launchScriptFile);
     return { ok: true };
   } catch (error: any) {
-    const backend = getMuxBackend() ?? "unknown";
     return {
       error:
-        `Failed to send Escape to subagent "${running.name}" via ${backend}: ` +
+        `Failed to send Escape to subagent "${running.name}" via ${host.identity.kind}: ` +
         `${error?.message ?? String(error)}`,
     };
   }
@@ -1272,8 +1267,9 @@ function buildDispatcherArgs(options: {
 function hostForAttempt(record: AttemptRecord): WorkerHost {
   const adapter = getLifecycleAdapter();
   if (adapter.workerHost) return adapter.workerHost(record.host);
-  if (record.host.kind !== "tmux") throw new Error(`Unsupported worker host: ${record.host.kind}`);
-  return new TmuxWorkerHost(record.host.id, adapter);
+  if (record.host.kind === "tmux") return new TmuxWorkerHost(record.host.id, adapter);
+  if (record.host.kind === "herdr") return new HerdrWorkerHost(record.host.id, null, record.host.terminalId, adapter);
+  throw new Error(`Unsupported worker host: ${(record.host as { kind: string }).kind}`);
 }
 
 function runningFromAttempt(
@@ -1386,15 +1382,14 @@ async function launchSubagentImpl(
   validateLaunch(params, null, !!process.env.PI_SUBAGENT_ID);
   const agentDefs = params.agent ? loadAgentDefaults(params.agent) : null;
   validateLaunch(params, agentDefs);
-  if (getMuxBackend() !== "tmux") throw new Error("This hardened fork requires tmux; no backend fallback is allowed");
   const effectiveTools = params.tools ?? agentDefs?.tools;
   const effectiveSkills = params.skills ?? agentDefs?.skills;
   const effectiveInteractive = resolveEffectiveInteractive(params, agentDefs);
   const requested = requestedIdentity(params, agentDefs, ctx);
   const adapter = getLifecycleAdapter();
   const host = currentWorkerHost(process.env, adapter);
-  const parentPane = process.env.TMUX_PANE;
-  if (!host || !parentPane) throw new Error("tmux socket/window identity is required");
+  const parentPane = host?.identity.kind === "herdr" ? process.env.HERDR_PANE_ID : process.env.TMUX_PANE;
+  if (!host || !parentPane) throw new Error("tmux or Herdr caller identity is required");
   const container = host.currentContainer(parentPane);
 
   const sessionFile = ctx.sessionManager.getSessionFile();
@@ -1407,6 +1402,7 @@ async function launchSubagentImpl(
   const targetCwdForSession = effectiveCwd ?? ctx.cwd;
   const sessionDir = getDefaultSessionDirFor(targetCwdForSession, effectiveAgentDir);
   const attemptId = randomUUID();
+  const completionToken = randomUUID();
   const timestamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 23) + "Z";
   const subagentSessionFile = join(sessionDir, `${timestamp}_${attemptId}.jsonl`);
 
@@ -1483,11 +1479,25 @@ async function launchSubagentImpl(
     taskArg,
   });
   const launchScriptFile = join(artifactDir, "subagent-scripts", `subagent-${attemptId}.sh`);
+  const env: Record<string, string> = {
+    PI_SUBAGENT_NAME: params.name,
+    PI_SUBAGENT_SESSION: subagentSessionFile,
+    PI_SUBAGENT_COMPLETION_FILE: completionFile,
+    PI_SUBAGENT_TOKEN: completionToken,
+    PI_SUBAGENT_ID: attemptId,
+    PI_SUBAGENT_ACTIVITY_FILE: activityFile,
+  };
+  if (params.agent) env.PI_SUBAGENT_AGENT = params.agent;
+  if (agentDefs?.autoExit) env.PI_SUBAGENT_AUTO_EXIT = "1";
+  if (denySet.size > 0) env.PI_DENY_TOOLS = [...denySet].join(",");
+  if (localAgentDir && existsSync(localAgentDir)) env.PI_CODING_AGENT_DIR = localAgentDir;
+  else if (process.env.PI_CODING_AGENT_DIR) env.PI_CODING_AGENT_DIR = process.env.PI_CODING_AGENT_DIR;
   if (!registryFile) throw new Error("Worker registry path is not initialized");
   const began = persistPreparingIntent({
     registryPath: registryFile,
     registry: { ...workerRegistry, invocations: invocationCount },
     attemptId,
+    completionToken,
     name: params.name,
     task: params.task,
     agent: params.agent,
@@ -1499,24 +1509,12 @@ async function launchSubagentImpl(
     completionFile,
     host,
     container,
+    hostLaunch: { cwd: targetCwdForSession, env },
     requested,
     interactive: effectiveInteractive,
     paneStartCommand: freezePaneStartCommand(launchScriptFile),
   }, adapter);
   commitRegistry(began.registry, began.record);
-  const env: Record<string, string> = {
-    PI_SUBAGENT_NAME: params.name,
-    PI_SUBAGENT_SESSION: subagentSessionFile,
-    PI_SUBAGENT_COMPLETION_FILE: completionFile,
-    PI_SUBAGENT_TOKEN: began.record.completionToken,
-    PI_SUBAGENT_ID: began.record.attemptId,
-    PI_SUBAGENT_ACTIVITY_FILE: activityFile,
-  };
-  if (params.agent) env.PI_SUBAGENT_AGENT = params.agent;
-  if (agentDefs?.autoExit) env.PI_SUBAGENT_AUTO_EXIT = "1";
-  if (denySet.size > 0) env.PI_DENY_TOOLS = [...denySet].join(",");
-  if (localAgentDir && existsSync(localAgentDir)) env.PI_CODING_AGENT_DIR = localAgentDir;
-  else if (process.env.PI_CODING_AGENT_DIR) env.PI_CODING_AGENT_DIR = process.env.PI_CODING_AGENT_DIR;
   const dispatcherArgs = buildDispatcherArgs({
     provider: requested.provider,
     model: requested.model,
@@ -1718,7 +1716,7 @@ async function watchSubagent(
       sessionFile,
     };
   }
-  const foreign = classifySocket(record, tmuxSocketFromEnv()) === "foreign";
+  const foreign = classifyHost(record, currentWorkerHostIdentity()) === "foreign";
   let sawExit = false;
   try {
     while (!signal.aborted && watcherIsCurrent(running)) {
@@ -1792,6 +1790,17 @@ async function watchSubagent(
             const next = persistRecord(registryFile, workerRegistry, absent);
             commitRegistry(next, absent, running);
             record = absent;
+            runningSubagents.delete(running.id);
+            break;
+          }
+          // A Herdr script returns to the pane shell after its exit receipt,
+          // intentionally erasing the only live argv ownership witness.
+          // Retain that pane as unknown rather than retrying a forbidden close.
+          if (record.host.kind === "herdr" && recovered.kind === "unknown") {
+            const retained: AttemptRecord = { ...record, resourceState: "unknown", watcherDiagnostic: recovered.reason };
+            const next = persistRecord(registryFile, workerRegistry, retained);
+            commitRegistry(next, retained, running);
+            record = retained;
             runningSubagents.delete(running.id);
             break;
           }
@@ -1875,9 +1884,9 @@ export default function subagentsExtension(pi: ExtensionAPI) {
     workerRegistry = loaded.registry;
     invocationCount = loaded.registry.invocations;
     registryReady = true;
-    const currentSocket = tmuxSocketFromEnv();
+    const currentHost = currentWorkerHostIdentity();
     for (const original of loaded.registry.workers) {
-      const recovered = applyRecovery(registryFile, workerRegistry, original, currentSocket);
+      const recovered = applyRecovery(registryFile, workerRegistry, original, currentHost);
       commitRegistry(recovered.registry, recovered.record);
       const record = recovered.record;
       if (record.resourceState === "closed" || record.resourceState === "released" || record.resourceState === "proven_absent") {
@@ -1885,8 +1894,8 @@ export default function subagentsExtension(pi: ExtensionAPI) {
       }
       const running = runningFromAttempt(record, { watcherGeneration });
       runningSubagents.set(running.id, running);
-      if (classifySocket(record, currentSocket) === "foreign") {
-        ctx.ui.notify(`Worker ${record.name} retained on another tmux socket; completion-only recovery (no tmux calls).`, "warning");
+      if (classifyHost(record, currentHost) === "foreign") {
+        ctx.ui.notify(`Worker ${record.name} retained on another worker host; completion-only recovery (no host calls).`, "warning");
       }
       if (record.deliveryState === "pending" || record.deliveryState === "attempted") {
         ctx.ui.notify(`Worker ${record.name} has a pending/uncertain reported outcome (authenticated, unverified). Replay with /subagents-replay ${record.attemptId}.`, "warning");
@@ -1993,8 +2002,8 @@ export default function subagentsExtension(pi: ExtensionAPI) {
           };
         }
 
-        // Validate prerequisites
-        if (!isMuxAvailable()) {
+        // Only these two worker hosts have lifecycle ownership proofs.
+        if (!currentWorkerHostIdentity()) {
           return muxUnavailableResult();
         }
 
@@ -2285,9 +2294,8 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         requireTuiParent(ctx);
         const name = params.name ?? "Resume";
         validateLaunch({ name, thinking: params.thinking }, null, !!process.env.PI_SUBAGENT_ID);
-        if (getMuxBackend() !== "tmux") throw new Error("This hardened fork requires tmux");
         const { autoExit, interactive } = resolveResumeLaunchBehavior(params);
-        if (!isMuxAvailable()) {
+        if (!currentWorkerHostIdentity()) {
           return muxUnavailableResult();
         }
         if (!existsSync(params.sessionPath)) {
@@ -2300,8 +2308,8 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         }
         const adapter = getLifecycleAdapter();
         const host = currentWorkerHost(process.env, adapter);
-        const parentPane = process.env.TMUX_PANE;
-        if (!host || !parentPane) throw new Error("tmux socket/window identity is required");
+        const parentPane = host?.identity.kind === "herdr" ? process.env.HERDR_PANE_ID : process.env.TMUX_PANE;
+        if (!host || !parentPane) throw new Error("tmux or Herdr caller identity is required");
         const container = host.currentContainer(parentPane);
         const canonicalSession = canonicalizeSessionFile(params.sessionPath, adapter);
         const expectedPiSessionId = readSessionHeaderId(canonicalSession, adapter);
@@ -2318,6 +2326,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
           : requestedIdentity(params, null, ctx);
         const artifactDir = getArtifactDir(ctx.sessionManager.getSessionDir(), parentSessionId);
         const attemptId = randomUUID();
+        const completionToken = randomUUID();
         const activityFile = getSubagentActivityFile(artifactDir, attemptId);
         const completionFile = join(artifactDir, "completions", `${attemptId}.json`);
         mkdirSync(dirname(activityFile), { recursive: true, mode: 0o700 });
@@ -2330,11 +2339,22 @@ export default function subagentsExtension(pi: ExtensionAPI) {
           promptArgs.push(`@${resumeMsgFile}`);
         }
         const launchScriptFile = join(artifactDir, "subagent-scripts", `resume-${attemptId}.sh`);
+        const env: Record<string, string> = {
+          PI_SUBAGENT_NAME: name,
+          PI_SUBAGENT_SESSION: canonicalSession,
+          PI_SUBAGENT_COMPLETION_FILE: completionFile,
+          PI_SUBAGENT_TOKEN: completionToken,
+          PI_SUBAGENT_ID: attemptId,
+          PI_SUBAGENT_ACTIVITY_FILE: activityFile,
+        };
+        if (autoExit) env.PI_SUBAGENT_AUTO_EXIT = "1";
+        if (process.env.PI_CODING_AGENT_DIR) env.PI_CODING_AGENT_DIR = process.env.PI_CODING_AGENT_DIR;
         if (!registryFile) throw new Error("Worker registry path is not initialized");
         const began = persistPreparingIntent({
           registryPath: registryFile,
           registry: { ...workerRegistry, invocations: invocationCount },
           attemptId,
+          completionToken,
           name,
           task: params.message ?? "resumed session",
           title: name,
@@ -2345,22 +2365,13 @@ export default function subagentsExtension(pi: ExtensionAPI) {
           completionFile,
           host,
           container,
+          hostLaunch: { cwd: ctx.cwd, env },
           requested,
           interactive,
           paneStartCommand: freezePaneStartCommand(launchScriptFile),
           expectedPiSessionId,
         }, adapter);
         commitRegistry(began.registry, began.record);
-        const env: Record<string, string> = {
-          PI_SUBAGENT_NAME: name,
-          PI_SUBAGENT_SESSION: canonicalSession,
-          PI_SUBAGENT_COMPLETION_FILE: completionFile,
-          PI_SUBAGENT_TOKEN: began.record.completionToken,
-          PI_SUBAGENT_ID: began.record.attemptId,
-          PI_SUBAGENT_ACTIVITY_FILE: activityFile,
-        };
-        if (autoExit) env.PI_SUBAGENT_AUTO_EXIT = "1";
-        if (process.env.PI_CODING_AGENT_DIR) env.PI_CODING_AGENT_DIR = process.env.PI_CODING_AGENT_DIR;
         const dispatcherArgs = buildDispatcherArgs({
           provider: requested.provider,
           model: requested.model,
@@ -2462,8 +2473,14 @@ export default function subagentsExtension(pi: ExtensionAPI) {
         ctx.ui.notify("Registry unavailable", "error");
         return;
       }
-      if (classifySocket(record, tmuxSocketFromEnv()) === "foreign") {
-        ctx.ui.notify("Foreign-socket workers cannot be released from this session (zero tmux calls).", "error");
+      if (classifyHost(record, currentWorkerHostIdentity()) === "foreign") {
+        ctx.ui.notify(
+          record.host.kind === "tmux"
+            ? "Foreign-socket workers cannot be released from this session (zero tmux calls)."
+            : "Foreign-host workers cannot be released from this session (zero host calls).",
+          "error",
+        );
+
         return;
       }
       const release = await ctx.ui.confirm("Release without closing? Pane survives as yours.", record.attemptId);

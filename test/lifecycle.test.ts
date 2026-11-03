@@ -5,12 +5,13 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {randomUUID} from 'node:crypto';
 import {createDefaultAdapter,setLifecycleAdapter} from '../pi-extension/subagents/adapter.ts';
-import {TmuxWorkerHost, type WorkerHost} from '../pi-extension/subagents/worker-host.ts';
+import {HerdrWorkerHost, TmuxWorkerHost, currentWorkerHost, type WorkerHost} from '../pi-extension/subagents/worker-host.ts';
 import {
   persistPreparingIntent,
   persistSplitRequested,
   invokeSplit,
   releaseWithoutClose,
+  closeOwned,
   applyRecovery,
   applyStartupReceipt,
   freezePaneStartCommand,
@@ -83,6 +84,89 @@ test('preparing and split_requested persist before tmux; start command is exact'
   assert.ok(calls[0].includes('split-window'));
   assert.equal(launched.record.paneStartCommand, freezePaneStartCommand(script));
   setLifecycleAdapter(null);
+});
+
+test('Herdr ownership requires the captured terminal id and exact live bash argv', () => {
+  const socket = '/tmp/herdr.sock';
+  const script = '/tmp/pi-herdr-launch.sh';
+  let terminalId = 'term-original';
+  let argv = ['bash', script];
+  const calls: string[][] = [];
+  const adapter = {
+    ...createDefaultAdapter(),
+    herdr(args: string[]) {
+      calls.push([...args]);
+      if (args[0] === 'pane' && args[1] === 'split') {
+        return JSON.stringify({ result: { pane: { pane_id: 'w1:p2', terminal_id: terminalId, tab_id: 'w1:t1' } } });
+      }
+      if (args[0] === 'pane' && args[1] === 'run') return '';
+      if (args[0] === 'pane' && args[1] === 'get') {
+        return JSON.stringify({ result: { pane: { pane_id: 'w1:p2', terminal_id: terminalId, tab_id: 'w1:t1' } } });
+      }
+      if (args[0] === 'pane' && args[1] === 'process-info') {
+        return JSON.stringify({ result: { process_info: { pane_id: 'w1:p2', foreground_processes: [{ argv }] } } });
+      }
+      throw new Error(`unexpected herdr ${args.join(' ')}`);
+    },
+  };
+  const host = new HerdrWorkerHost(socket, 'w1:p1', undefined, adapter);
+  const split = host.splitLaunch('w1:t1', script, { cwd: '/tmp', env: { PI_SUBAGENT_ID: 'attempt' } });
+  assert.deepEqual(split, { surface: 'w1:p2', launchCommand: `bash ${script}`, attemptTag: '', terminalId: 'term-original' });
+  assert.deepEqual(calls[0], ['pane', 'split', '--pane', 'w1:p1', '--direction', 'right', '--cwd', '/tmp', '--env', 'PI_SUBAGENT_ID=attempt', '--no-focus']);
+  assert.deepEqual(calls[1], ['pane', 'run', 'w1:p2', 'bash', script]);
+
+  const recovered = new HerdrWorkerHost(socket, null, 'term-original', adapter);
+  assert.equal(recovered.ownsSurface('w1:p2', 'attempt', 'token', script), true);
+  terminalId = 'term-reused';
+  assert.equal(recovered.ownsSurface('w1:p2', 'attempt', 'token', script), false, 'terminal mismatch is foreign');
+  terminalId = 'term-original';
+  argv = ['bash', '/tmp/other.sh'];
+  assert.equal(recovered.ownsSurface('w1:p2', 'attempt', 'token', script), false, 'argv mismatch is foreign');
+  argv = ['zsh'];
+  assert.equal(recovered.ownsSurface('w1:p2', 'attempt', 'token', script), false, 'exited script leaves only the shell');
+});
+
+test('Herdr recovery never adopts or kills an old pane whose proof has disappeared', () => {
+  const root = tempRoot();
+  const socket = '/tmp/herdr.sock';
+  const script = join(root, 'launch.sh');
+  const adapter = {
+    ...createDefaultAdapter(),
+    herdr(args: string[]) {
+      if (args[1] === 'split') return JSON.stringify({ result: { pane: { pane_id: 'w1:p2', terminal_id: 'term-1', tab_id: 'w1:t1' } } });
+      if (args[1] === 'run') return '';
+      if (args[1] === 'list') return JSON.stringify({ result: { panes: [{ pane_id: 'w1:p2', terminal_id: 'term-1', tab_id: 'w1:t1' }] } });
+      if (args[1] === 'get') return JSON.stringify({ result: { pane: { pane_id: 'w1:p2', terminal_id: 'term-1', tab_id: 'w1:t1' } } });
+      if (args[1] === 'process-info') return JSON.stringify({ result: { process_info: { pane_id: 'w1:p2', foreground_processes: [{ argv: ['zsh'] }] } } });
+      throw new Error(`unexpected herdr ${args.join(' ')}`);
+    },
+    workerHost(identity: any) {
+      return new HerdrWorkerHost(identity.id, 'w1:p1', identity.terminalId, this);
+    },
+    now: () => 1,
+  };
+  const registryPath = join(root, 'workers.json');
+  const began = persistPreparingIntent({
+    registryPath, registry: { version: 1, invocations: 0, workers: [] }, attemptId: randomUUID(),
+    name: 'herdr', task: 't', parentSessionId: randomUUID(), sessionFile: join(root, 's.jsonl'),
+    launchScriptFile: script, completionFile: join(root, 'done.json'),
+    host: new HerdrWorkerHost(socket, 'w1:p1', undefined, adapter), container: 'w1:t1',
+    hostLaunch: { cwd: root, env: { PI_SUBAGENT_ID: 'attempt' } },
+    requested: { provider: 'xai', model: 'grok-4.6', thinking: 'high' }, interactive: false,
+  }, adapter);
+  const split = persistSplitRequested(registryPath, began.registry, began.record, freezePaneStartCommand(script), adapter);
+  const launched = invokeSplit(registryPath, split.registry, split.record, adapter);
+  assert.deepEqual(launched.record.host, { kind: 'herdr', id: socket, terminalId: 'term-1' });
+  const recovered = applyRecovery(registryPath, launched.registry, launched.record, launched.record.host, adapter);
+  assert.equal(recovered.record.resourceState, 'unknown');
+  assert.throws(() => closeOwned(registryPath, recovered.registry, recovered.record, adapter), /ownership changed/);
+});
+
+test('detects Herdr only with both required environment variables and keeps tmux fallback', () => {
+  const adapter = createDefaultAdapter();
+  assert.equal(currentWorkerHost({ HERDR_PANE_ID: 'w1:p1', HERDR_SOCKET_PATH: '/tmp/herdr.sock' }, adapter)?.identity.kind, 'herdr');
+  assert.equal(currentWorkerHost({ HERDR_PANE_ID: 'w1:p1' }, adapter), null);
+  assert.equal(currentWorkerHost({ TMUX: '/tmp/tmux.sock,1,2' }, adapter)?.identity.kind, 'tmux');
 });
 
 test('split failure without matching start command on reachable window is proven_absent', () => {

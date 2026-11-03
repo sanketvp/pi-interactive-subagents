@@ -10,6 +10,21 @@ import { createDefaultAdapter, setLifecycleAdapter } from "../pi-extension/subag
 import { visibleWidth } from "@earendil-works/pi-tui";
 import * as subagentsModule from "../pi-extension/subagents/index.ts";
 
+const inheritedHerdrEnv = {
+  pane: process.env.HERDR_PANE_ID,
+  socket: process.env.HERDR_SOCKET_PATH,
+};
+before(() => {
+  delete process.env.HERDR_PANE_ID;
+  delete process.env.HERDR_SOCKET_PATH;
+});
+after(() => {
+  if (inheritedHerdrEnv.pane === undefined) delete process.env.HERDR_PANE_ID;
+  else process.env.HERDR_PANE_ID = inheritedHerdrEnv.pane;
+  if (inheritedHerdrEnv.socket === undefined) delete process.env.HERDR_SOCKET_PATH;
+  else process.env.HERDR_SOCKET_PATH = inheritedHerdrEnv.socket;
+});
+
 import {
   getLeafId,
   getNewEntries,
