@@ -987,7 +987,7 @@ function isExactOwnedSurface(running: RunningSubagent): boolean {
   // record could otherwise target a pane that is no longer (or never was)
   // this attempt's pane. Require the pane's live @pi-worker-token tag to
   // match the record's completionToken -- the same ownership proof already
-  // required before releasing or closing a pane (readPaneToken/killOwnedPane).
+  // required before releasing or closing a pane.
   try {
     return host.ownsSurface(surface, attempt.attemptId, attempt.completionToken);
   } catch {

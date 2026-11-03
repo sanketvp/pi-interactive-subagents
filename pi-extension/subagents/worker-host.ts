@@ -69,7 +69,7 @@ export class TmuxWorkerHost implements WorkerHost {
   ownsSurface(surface: string, attemptId: string, token: string): boolean {
     requirePaneId(surface, "pane id");
     void attemptId;
-    const actualToken = this.tmux(["show-options", "-p", "-v", "-t", surface, "@pi-worker-token"]);
+    const actualToken = this.tmux(["show-options", "-p", "-v", "-t", surface, "--", "@pi-worker-token"]);
     return actualToken === token;
   }
 
