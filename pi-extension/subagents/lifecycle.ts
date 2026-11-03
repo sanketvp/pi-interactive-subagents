@@ -235,7 +235,7 @@ function hostFor(record: AttemptRecord, adapter = getLifecycleAdapter()): Worker
   const host = record.host;
   if (adapter.workerHost) return adapter.workerHost(host);
   if (host.kind === "tmux") return new TmuxWorkerHost(host.id, adapter);
-  if (host.kind === "herdr") return new HerdrWorkerHost(host.id, null, host.terminalId, adapter);
+  if (host.kind === "herdr") return new HerdrWorkerHost(host.id, host.terminalId, adapter);
   throw new Error(`Unsupported worker host: ${(host as { kind: string }).kind}`);
 }
 
@@ -251,6 +251,9 @@ export function recoverSurface(
   adapter = getLifecycleAdapter(),
 ): { kind: "adopted"; pane: WorkerSurfaceEvidence } | { kind: "proven_absent" } | { kind: "unknown"; reason: string } {
   try {
+    if (record.host.kind === "herdr" && record.surface === null) {
+      return { kind: "unknown", reason: "Herdr pane was requested but never recorded; cannot be proven ours" };
+    }
     const host = hostFor(record, adapter);
     const panes = host.listSurfaces(record.container);
     if (record.host.kind === "herdr") {
@@ -285,13 +288,10 @@ export function invokeSplit(
   record: AttemptRecord,
   adapter = getLifecycleAdapter(),
 ): { registry: WorkerRegistry; record: AttemptRecord } {
+  let persisted: { registry: WorkerRegistry; record: AttemptRecord } | null = null;
   try {
-    const split = hostFor(record, adapter).splitLaunch(record.container, record.launchScriptFile, record.hostLaunch);
-    // Accept the H1 string result from injected legacy test hosts while native
-    // hosts return the evidence required to persist Herdr's terminal identity.
-    const evidence: WorkerSurfaceEvidence = typeof split === "string"
-      ? { surface: split, launchCommand: record.paneStartCommand, attemptTag: "" }
-      : split;
+    const hostForSplit = hostFor(record, adapter);
+    const evidence = hostForSplit.splitLaunch(record.container, record.launchScriptFile, record.hostLaunch);
     if (record.host.kind === "herdr" && !evidence.terminalId) {
       throw new Error("Herdr split did not return a terminal identity");
     }
@@ -305,25 +305,28 @@ export function invokeSplit(
       resourceState: "launching",
     };
     const next = persistRecord(registryPath, registry, nextRecord, adapter);
-    return { registry: next, record: nextRecord };
+    persisted = { registry: next, record: nextRecord };
+    hostFor(nextRecord, adapter).runLaunch(evidence.surface, record.launchScriptFile);
+    return persisted;
   } catch (error: any) {
-    const recovered = recoverSurface(record, adapter);
+    const prior = persisted ?? { registry, record };
+    const recovered = recoverSurface(prior.record, adapter);
     if (recovered.kind === "adopted") {
       const nextRecord: AttemptRecord = {
-        ...record,
+        ...prior.record,
         surface: recovered.pane.surface,
         resourceState: "unknown",
       };
-      const next = persistRecord(registryPath, registry, nextRecord, adapter);
+      const next = persistRecord(registryPath, prior.registry, nextRecord, adapter);
       return { registry: next, record: nextRecord };
     }
     if (recovered.kind === "proven_absent") {
-      const nextRecord: AttemptRecord = { ...record, resourceState: "proven_absent" };
-      const next = persistRecord(registryPath, registry, nextRecord, adapter);
-      throw new Error(`tmux split was not accepted: ${error?.message ?? String(error)}`);
+      const nextRecord: AttemptRecord = { ...prior.record, resourceState: "proven_absent" };
+      const next = persistRecord(registryPath, prior.registry, nextRecord, adapter);
+      throw new Error(`worker host split was not accepted: ${error?.message ?? String(error)}`);
     }
-    const nextRecord: AttemptRecord = { ...record, resourceState: "unknown" };
-    const next = persistRecord(registryPath, registry, nextRecord, adapter);
+    const nextRecord: AttemptRecord = { ...prior.record, resourceState: "unknown" };
+    const next = persistRecord(registryPath, prior.registry, nextRecord, adapter);
     return { registry: next, record: nextRecord };
   }
 }
@@ -356,9 +359,17 @@ export function closeOwned(
   return { registry: next, record: nextRecord };
 }
 
-export function classifySocket(record: AttemptRecord, currentSocket: string | null): "current" | "foreign" {
-  if (!currentSocket || record.host.kind !== "tmux" || record.host.id !== currentSocket) return "foreign";
-  return "current";
+export function closeCompleted(
+  registryPath: string,
+  registry: WorkerRegistry,
+  record: AttemptRecord,
+  adapter = getLifecycleAdapter(),
+): { registry: WorkerRegistry; record: AttemptRecord } {
+  if (!record.surface) throw new Error("Cannot close an attempt with no surface");
+  hostFor(record, adapter).closeCompleted(record.surface, record.attemptId, record.completionToken, record.launchScriptFile);
+  const nextRecord: AttemptRecord = { ...record, resourceState: "closed" };
+  const next = persistRecord(registryPath, registry, nextRecord, adapter);
+  return { registry: next, record: nextRecord };
 }
 
 export function classifyHost(record: AttemptRecord, currentHost: WorkerHostIdentity | null): "current" | "foreign" {
@@ -370,13 +381,10 @@ export function applyRecovery(
   registryPath: string,
   registry: WorkerRegistry,
   record: AttemptRecord,
-  currentHost: WorkerHostIdentity | string | null,
+  currentHost: WorkerHostIdentity | null,
   adapter = getLifecycleAdapter(),
 ): { registry: WorkerRegistry; record: AttemptRecord; tmuxCalls: boolean } {
-  const identity = typeof currentHost === "string"
-    ? { kind: "tmux", id: currentHost } as WorkerHostIdentity
-    : currentHost;
-  if (classifyHost(record, identity) === "foreign") {
+  if (classifyHost(record, currentHost) === "foreign") {
     if (!LIVE_RESOURCE_STATES.has(record.resourceState)) return { registry, record, tmuxCalls: false };
     if (record.resourceState === "foreign") return { registry, record, tmuxCalls: false };
     const nextRecord: AttemptRecord = { ...record, resourceState: "foreign" };

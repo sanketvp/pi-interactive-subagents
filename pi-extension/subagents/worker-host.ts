@@ -6,7 +6,7 @@ export type WorkerHostIdentity =
 
 export interface WorkerHostLaunchOptions {
   cwd: string;
-  env: Record<string, string>;
+  callerPane?: string;
 }
 
 export interface WorkerSurfaceEvidence {
@@ -14,20 +14,20 @@ export interface WorkerSurfaceEvidence {
   launchCommand: string;
   attemptTag: string;
   terminalId?: string;
-  foregroundArgv?: string[];
 }
 
 export interface WorkerHost {
   readonly identity: WorkerHostIdentity;
   currentContainer(parentSurface: string): string;
-  splitLaunch(container: string, launchScript: string, options?: WorkerHostLaunchOptions): WorkerSurfaceEvidence | string;
+  splitLaunch(container: string, launchScript: string, options?: WorkerHostLaunchOptions): WorkerSurfaceEvidence;
+  runLaunch(surface: string, launchScript: string): void;
   listSurfaces(container: string): WorkerSurfaceEvidence[];
   ownsSurface(surface: string, attemptId: string, token: string, launchScript?: string): boolean;
   ownershipPreamble(attemptId: string, token: string): string;
   clearOwnership(surface: string): void;
   killOwned(surface: string, attemptId: string, token: string, launchScript?: string): void;
   interruptOwned(surface: string, attemptId: string, token: string, launchScript?: string): void;
-  readOwned(surface: string, attemptId: string, token: string, launchScript?: string, lines?: number): string;
+  closeCompleted(surface: string, attemptId: string, token: string, launchScript?: string): void;
 }
 
 function tmuxArgs(socket: string, args: string[]): string[] {
@@ -66,6 +66,8 @@ export class TmuxWorkerHost implements WorkerHost {
     return { surface, launchCommand: `bash ${launchScript}`, attemptTag: "" };
   }
 
+  runLaunch(_surface: string, _launchScript: string): void {}
+
   listSurfaces(container: string): WorkerSurfaceEvidence[] {
     const output = this.tmux(["list-panes", "-t", container, "-F", "#{pane_id}\t#{pane_start_command}\t#{@pi-attempt}"]);
     if (!output) return [];
@@ -102,9 +104,8 @@ export class TmuxWorkerHost implements WorkerHost {
     this.tmux(["send-keys", "-t", surface, "Escape"]);
   }
 
-  readOwned(surface: string, attemptId: string, token: string, _launchScript?: string, lines = 50): string {
-    if (!this.ownsSurface(surface, attemptId, token)) throw new Error("Worker pane ownership changed; retaining pane");
-    return this.tmux(["capture-pane", "-p", "-t", surface, "-S", `-${Math.max(1, lines)}`]);
+  closeCompleted(surface: string, attemptId: string, token: string, launchScript?: string): void {
+    this.killOwned(surface, attemptId, token, launchScript);
   }
 
   private tmux(args: string[]): string {
@@ -179,13 +180,11 @@ function foregroundArgv(output: string, pane: string): string[][] {
  */
 export class HerdrWorkerHost implements WorkerHost {
   readonly identity: WorkerHostIdentity;
-  private readonly callerPane: string | null;
   private readonly adapter: LifecycleAdapter;
 
-  constructor(socket: string, callerPane: string | null, terminalId?: string, adapter: LifecycleAdapter = getLifecycleAdapter()) {
+  constructor(socket: string, terminalId?: string, adapter: LifecycleAdapter = getLifecycleAdapter()) {
     if (!socket) throw new Error("Herdr socket path is required");
     this.identity = { kind: "herdr", id: socket, ...(terminalId ? { terminalId } : {}) };
-    this.callerPane = callerPane;
     this.adapter = adapter;
   }
 
@@ -195,19 +194,18 @@ export class HerdrWorkerHost implements WorkerHost {
   }
 
   splitLaunch(container: string, launchScript: string, options?: WorkerHostLaunchOptions): WorkerSurfaceEvidence {
-    if (!this.callerPane) throw new Error("Herdr caller pane id is required");
+    if (!options?.callerPane) throw new Error("Herdr caller pane id is required");
     if (!options?.cwd) throw new Error("Herdr worker launch cwd is required");
-    const args = ["pane", "split", "--pane", this.callerPane, "--direction", "right", "--cwd", options.cwd];
-    for (const [key, value] of Object.entries(options.env)) args.push("--env", `${key}=${value}`);
-    args.push("--no-focus");
+    const args = ["pane", "split", "--pane", options.callerPane, "--direction", "right", "--cwd", options.cwd, "--no-focus"];
     const pane = paneFromResponse(this.herdr(args), "pane split");
     const surface = herdrPaneId(pane.pane_id, "split pane_id");
     const terminalId = herdrPaneId(pane.terminal_id, "split terminal_id");
     if (pane.tab_id !== container) throw new Error("Herdr split returned a pane outside the recorded tab");
-    // Herdr has no atomic split-with-command.  `pane run` types exactly this
-    // argv into the new shell, so ownership is only provable while bash lives.
-    this.herdr(["pane", "run", surface, "bash", launchScript]);
     return { surface, launchCommand: `bash ${launchScript}`, attemptTag: "", terminalId };
+  }
+
+  runLaunch(surface: string, launchScript: string): void {
+    this.herdr(["pane", "run", surface, "bash", launchScript]);
   }
 
   listSurfaces(container: string): WorkerSurfaceEvidence[] {
@@ -253,9 +251,11 @@ export class HerdrWorkerHost implements WorkerHost {
     this.herdr(["pane", "send-keys", surface, "esc"]);
   }
 
-  readOwned(surface: string, attemptId: string, token: string, launchScript?: string, lines = 50): string {
-    if (!this.ownsSurface(surface, attemptId, token, launchScript)) throw new Error("Worker pane ownership changed; retaining pane");
-    return this.herdr(["pane", "read", surface, "--source", "recent-unwrapped", "--lines", String(Math.max(1, lines))]);
+  closeCompleted(surface: string, _attemptId: string, _token: string, _launchScript?: string): void {
+    if (!this.identity.terminalId) throw new Error("Worker pane ownership changed; retaining pane");
+    const pane = paneFromResponse(this.herdr(["pane", "get", surface]), "pane get");
+    if (pane.terminal_id !== this.identity.terminalId) throw new Error("Worker pane ownership changed; retaining pane");
+    this.herdr(["pane", "close", surface]);
   }
 
   private herdr(args: string[]): string {
@@ -271,12 +271,12 @@ export function tmuxSocketFromEnv(env: NodeJS.ProcessEnv = process.env): string 
 export function herdrHostFromEnv(env: NodeJS.ProcessEnv = process.env, adapter = getLifecycleAdapter()): HerdrWorkerHost | null {
   const socket = env.HERDR_SOCKET_PATH;
   const pane = env.HERDR_PANE_ID;
-  return socket && pane ? new HerdrWorkerHost(socket, pane, undefined, adapter) : null;
+  return socket && pane ? new HerdrWorkerHost(socket, undefined, adapter) : null;
 }
 
 export function currentWorkerHost(env: NodeJS.ProcessEnv = process.env, adapter = getLifecycleAdapter()): WorkerHost | null {
-  const herdr = herdrHostFromEnv(env, adapter);
-  if (herdr) return herdr;
+  // Pi runs inside tmux when both hosts are present, so the innermost tmux wins.
   const socket = tmuxSocketFromEnv(env);
-  return socket ? new TmuxWorkerHost(socket, adapter) : null;
+  if (socket) return new TmuxWorkerHost(socket, adapter);
+  return herdrHostFromEnv(env, adapter);
 }

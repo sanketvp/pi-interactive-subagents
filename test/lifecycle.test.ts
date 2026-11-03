@@ -12,10 +12,11 @@ import {
   invokeSplit,
   releaseWithoutClose,
   closeOwned,
+  closeCompleted,
   applyRecovery,
   applyStartupReceipt,
   freezePaneStartCommand,
-  classifySocket,
+  classifyHost,
   matchPaneIdentity,
   writeLaunchScript,
 } from '../pi-extension/subagents/lifecycle.ts';
@@ -109,13 +110,15 @@ test('Herdr ownership requires the captured terminal id and exact live bash argv
       throw new Error(`unexpected herdr ${args.join(' ')}`);
     },
   };
-  const host = new HerdrWorkerHost(socket, 'w1:p1', undefined, adapter);
-  const split = host.splitLaunch('w1:t1', script, { cwd: '/tmp', env: { PI_SUBAGENT_ID: 'attempt' } });
+  const host = new HerdrWorkerHost(socket, undefined, adapter);
+  const split = host.splitLaunch('w1:t1', script, { cwd: '/tmp', callerPane: 'w1:p1' });
   assert.deepEqual(split, { surface: 'w1:p2', launchCommand: `bash ${script}`, attemptTag: '', terminalId: 'term-original' });
-  assert.deepEqual(calls[0], ['pane', 'split', '--pane', 'w1:p1', '--direction', 'right', '--cwd', '/tmp', '--env', 'PI_SUBAGENT_ID=attempt', '--no-focus']);
+  assert.deepEqual(calls[0], ['pane', 'split', '--pane', 'w1:p1', '--direction', 'right', '--cwd', '/tmp', '--no-focus']);
+  assert.equal(calls.some((args) => args.some((arg) => arg.includes('PI_SUBAGENT_TOKEN'))), false);
+  host.runLaunch('w1:p2', script);
   assert.deepEqual(calls[1], ['pane', 'run', 'w1:p2', 'bash', script]);
 
-  const recovered = new HerdrWorkerHost(socket, null, 'term-original', adapter);
+  const recovered = new HerdrWorkerHost(socket, 'term-original', adapter);
   assert.equal(recovered.ownsSurface('w1:p2', 'attempt', 'token', script), true);
   terminalId = 'term-reused';
   assert.equal(recovered.ownsSurface('w1:p2', 'attempt', 'token', script), false, 'terminal mismatch is foreign');
@@ -140,9 +143,6 @@ test('Herdr recovery never adopts or kills an old pane whose proof has disappear
       if (args[1] === 'process-info') return JSON.stringify({ result: { process_info: { pane_id: 'w1:p2', foreground_processes: [{ argv: ['zsh'] }] } } });
       throw new Error(`unexpected herdr ${args.join(' ')}`);
     },
-    workerHost(identity: any) {
-      return new HerdrWorkerHost(identity.id, 'w1:p1', identity.terminalId, this);
-    },
     now: () => 1,
   };
   const registryPath = join(root, 'workers.json');
@@ -150,8 +150,8 @@ test('Herdr recovery never adopts or kills an old pane whose proof has disappear
     registryPath, registry: { version: 1, invocations: 0, workers: [] }, attemptId: randomUUID(),
     name: 'herdr', task: 't', parentSessionId: randomUUID(), sessionFile: join(root, 's.jsonl'),
     launchScriptFile: script, completionFile: join(root, 'done.json'),
-    host: new HerdrWorkerHost(socket, 'w1:p1', undefined, adapter), container: 'w1:t1',
-    hostLaunch: { cwd: root, env: { PI_SUBAGENT_ID: 'attempt' } },
+    host: new HerdrWorkerHost(socket, undefined, adapter), container: 'w1:t1',
+    hostLaunch: { cwd: root, callerPane: 'w1:p1' },
     requested: { provider: 'xai', model: 'grok-4.6', thinking: 'high' }, interactive: false,
   }, adapter);
   const split = persistSplitRequested(registryPath, began.registry, began.record, freezePaneStartCommand(script), adapter);
@@ -162,8 +162,65 @@ test('Herdr recovery never adopts or kills an old pane whose proof has disappear
   assert.throws(() => closeOwned(registryPath, recovered.registry, recovered.record, adapter), /ownership changed/);
 });
 
+test('Herdr preserves split evidence before a failed run and recovers it as unknown', () => {
+  const root = tempRoot();
+  const socket = '/tmp/herdr.sock';
+  const script = join(root, 'launch.sh');
+  const adapter = {
+    ...createDefaultAdapter(),
+    herdr(args: string[]) {
+      if (args[1] === 'split') return JSON.stringify({ result: { pane: { pane_id: 'w1:p2', terminal_id: 'term-1', tab_id: 'w1:t1' } } });
+      if (args[1] === 'run') throw new Error('run failed');
+      if (args[1] === 'list') return JSON.stringify({ result: { panes: [{ pane_id: 'w1:p2', terminal_id: 'term-1', tab_id: 'w1:t1' }] } });
+      if (args[1] === 'get') return JSON.stringify({ result: { pane: { pane_id: 'w1:p2', terminal_id: 'term-1', tab_id: 'w1:t1' } } });
+      if (args[1] === 'process-info') return JSON.stringify({ result: { process_info: { pane_id: 'w1:p2', foreground_processes: [{ argv: ['zsh'] }] } } });
+      throw new Error(`unexpected herdr ${args.join(' ')}`);
+    }, now: () => 1,
+  };
+  const registryPath = join(root, 'workers.json');
+  const began = persistPreparingIntent({
+    registryPath, registry: { version: 1, invocations: 0, workers: [] }, attemptId: randomUUID(),
+    name: 'herdr', task: 't', parentSessionId: randomUUID(), sessionFile: join(root, 's.jsonl'),
+    launchScriptFile: script, completionFile: join(root, 'done.json'),
+    host: new HerdrWorkerHost(socket, undefined, adapter), container: 'w1:t1',
+    hostLaunch: { cwd: root, callerPane: 'w1:p1' },
+    requested: { provider: 'xai', model: 'grok-4.6', thinking: 'high' }, interactive: false,
+  }, adapter);
+  const requested = persistSplitRequested(registryPath, began.registry, began.record, freezePaneStartCommand(script), adapter);
+  const result = invokeSplit(registryPath, requested.registry, requested.record, adapter);
+  assert.equal(result.record.resourceState, 'unknown');
+  assert.equal(result.record.surface, 'w1:p2');
+  assert.equal(result.record.host.terminalId, 'term-1');
+});
+
+test('Herdr closes a completed worker using its authenticated receipt and terminal identity', () => {
+  const root = tempRoot();
+  const socket = '/tmp/herdr.sock';
+  const calls: string[][] = [];
+  const adapter = {
+    ...createDefaultAdapter(),
+    herdr(args: string[]) {
+      calls.push(args);
+      if (args[1] === 'get') return JSON.stringify({ result: { pane: { pane_id: 'w1:p2', terminal_id: 'term-1', tab_id: 'w1:t1' } } });
+      if (args[1] === 'close') return '';
+      throw new Error(`unexpected herdr ${args.join(' ')}`);
+    }, now: () => 1,
+  };
+  const host = new HerdrWorkerHost(socket, 'term-1', adapter);
+  const began = persistPreparingIntent({
+    registryPath: join(root, 'workers.json'), registry: { version: 1, invocations: 0, workers: [] }, name: 'herdr', task: 't', parentSessionId: randomUUID(),
+    sessionFile: join(root, 's.jsonl'), launchScriptFile: join(root, 'launch.sh'), completionFile: join(root, 'done.json'),
+    host, container: 'w1:t1', requested: { provider: 'xai', model: 'grok-4.6', thinking: 'high' }, interactive: false,
+  }, adapter);
+  const running = { ...began.record, surface: 'w1:p2', resourceState: 'running' as const };
+  const closed = closeCompleted(join(root, 'workers.json'), began.registry, running, adapter);
+  assert.equal(closed.record.resourceState, 'closed');
+  assert.deepEqual(calls, [['pane', 'get', 'w1:p2'], ['pane', 'close', 'w1:p2']]);
+});
+
 test('detects Herdr only with both required environment variables and keeps tmux fallback', () => {
   const adapter = createDefaultAdapter();
+  assert.equal(currentWorkerHost({ HERDR_PANE_ID: 'w1:p1', HERDR_SOCKET_PATH: '/tmp/herdr.sock', TMUX: '/tmp/tmux.sock,1,2' }, adapter)?.identity.kind, 'tmux');
   assert.equal(currentWorkerHost({ HERDR_PANE_ID: 'w1:p1', HERDR_SOCKET_PATH: '/tmp/herdr.sock' }, adapter)?.identity.kind, 'herdr');
   assert.equal(currentWorkerHost({ HERDR_PANE_ID: 'w1:p1' }, adapter), null);
   assert.equal(currentWorkerHost({ TMUX: '/tmp/tmux.sock,1,2' }, adapter)?.identity.kind, 'tmux');
@@ -244,11 +301,11 @@ test('foreign socket recovery performs zero tmux calls', () => {
     interactive: false,
     paneStartCommand: freezePaneStartCommand(script),
   }, adapter);
-  const recovered = applyRecovery(registryPath, began.registry, began.record, '/tmp/current-socket', adapter);
+  const recovered = applyRecovery(registryPath, began.registry, began.record, { kind: 'tmux', id: '/tmp/current-socket' }, adapter);
   assert.equal(recovered.record.resourceState, 'foreign');
   assert.equal(recovered.tmuxCalls, false);
   assert.equal(calls.length, 0);
-  assert.equal(classifySocket(began.record, '/tmp/current-socket'), 'foreign');
+  assert.equal(classifyHost(began.record, { kind: 'tmux', id: '/tmp/current-socket' }), 'foreign');
   setLifecycleAdapter(null);
 });
 
@@ -269,7 +326,7 @@ test('legacy tmuxSocket registry records load as host records and recover as bef
   if (loaded.status !== 'ok') return;
   assert.deepEqual(loaded.registry.workers[0].host, { kind: 'tmux', id: '/tmp/legacy-socket' });
   assert.equal(loaded.registry.workers[0].container, '@0');
-  const recovered = applyRecovery(path, loaded.registry, loaded.registry.workers[0], '/tmp/current-socket');
+  const recovered = applyRecovery(path, loaded.registry, loaded.registry.workers[0], { kind: 'tmux', id: '/tmp/current-socket' });
   assert.equal(recovered.record.resourceState, 'foreign');
   const written = JSON.parse(readFileSync(path, 'utf8'));
   assert.deepEqual(written.workers[0].host, { kind: 'tmux', id: '/tmp/legacy-socket' });
@@ -299,12 +356,15 @@ test('lifecycle uses the WorkerHost contract rather than direct tmux operations'
   const host: WorkerHost = {
     identity: { kind: 'tmux', id: '/tmp/mock-host' },
     currentContainer() { calls.push('container'); return '@0'; },
-    splitLaunch() { calls.push('split'); return '%9'; },
+    splitLaunch() { calls.push('split'); return { surface: '%9', launchCommand: 'bash /tmp/launch.sh', attemptTag: '' }; },
+    runLaunch() { calls.push('run'); },
     listSurfaces() { calls.push('list'); return [{ surface: '%9', launchCommand: 'bash /tmp/launch.sh', attemptTag: '' }]; },
     ownsSurface() { calls.push('owns'); return true; },
     ownershipPreamble() { return 'true'; },
     clearOwnership() { calls.push('clear'); },
     killOwned() { calls.push('kill'); },
+    interruptOwned() { calls.push('interrupt'); },
+    closeCompleted() { calls.push('close-completed'); },
   };
   const adapter = { ...createDefaultAdapter(), workerHost: () => host, tmux() { throw new Error('direct tmux call'); }, now: () => 1 };
   const began = persistPreparingIntent({ registryPath: join(root, 'workers.json'), registry: { version: 1, invocations: 0, workers: [] }, name: 'w', task: 't', parentSessionId: randomUUID(), sessionFile: join(root, 's.jsonl'), launchScriptFile: '/tmp/launch.sh', completionFile: join(root, 'done.json'), host, container: '@0', requested: { provider: 'xai', model: 'grok-4.6', thinking: 'high' }, interactive: false }, adapter);
@@ -313,7 +373,7 @@ test('lifecycle uses the WorkerHost contract rather than direct tmux operations'
   assert.equal(launched.record.surface, '%9');
   const released = releaseWithoutClose(join(root, 'workers.json'), launched.registry, launched.record, adapter);
   assert.equal(released.record.resourceState, 'released');
-  assert.deepEqual(calls, ['split', 'owns', 'clear']);
+  assert.deepEqual(calls, ['split', 'run', 'owns', 'clear']);
 });
 
 test('corrupt registry load leaves bytes untouched', () => {
@@ -462,7 +522,7 @@ test('applyRecovery: preparing with no surface is proven_absent with zero tmux c
   }, adapter);
   assert.equal(began.record.resourceState, 'preparing');
   assert.equal(began.record.surface, null);
-  const recovered = applyRecovery(registryPath, began.registry, began.record, '/tmp/tmux-test/sock', adapter);
+  const recovered = applyRecovery(registryPath, began.registry, began.record, { kind: 'tmux', id: '/tmp/tmux-test/sock' }, adapter);
   assert.equal(recovered.record.resourceState, 'proven_absent');
   assert.equal(recovered.tmuxCalls, false);
   assert.equal(calls.length, 0, 'a preparing/no-surface record proves tmux was never invoked; recovery must not call tmux at all');

@@ -96,7 +96,7 @@ export interface AttemptRecord {
   host: WorkerHostIdentity;
   container: string;
   /** Herdr split parameters persisted before the non-atomic CLI launch. */
-  hostLaunch?: { cwd: string; env: Record<string, string> };
+  hostLaunch?: { cwd: string; callerPane?: string };
   surface: string | null;
   sessionFile: string;
   launchScriptFile: string;
@@ -216,10 +216,7 @@ function validateAttemptRecord(worker: unknown, index: number): AttemptRecord {
   if (w.hostLaunch !== undefined) {
     if (!w.hostLaunch || typeof w.hostLaunch !== "object" || Array.isArray(w.hostLaunch)) fail("hostLaunch");
     const launch = w.hostLaunch as Record<string, unknown>;
-    if (!isAbsolutePath(launch.cwd) || !launch.env || typeof launch.env !== "object" || Array.isArray(launch.env)) fail("hostLaunch");
-    for (const [key, value] of Object.entries(launch.env as Record<string, unknown>)) {
-      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key) || !isNonEmptyString(value, MAX_PATH_LENGTH)) fail("hostLaunch");
-    }
+    if (!isAbsolutePath(launch.cwd) || (launch.callerPane !== undefined && !isNonEmptyString(launch.callerPane, 256))) fail("hostLaunch");
   }
   if (!isAbsolutePath(w.sessionFile)) fail("sessionFile");
   if (!isAbsolutePath(w.launchScriptFile)) fail("launchScriptFile");

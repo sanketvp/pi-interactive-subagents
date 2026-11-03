@@ -49,7 +49,7 @@ exec /bin/sh
    outcome:null, outcomeBytes:null, outcomeDigest:null, deliveryState:null,
    createdAt:Date.now(), name:'paused', task:'pause',
   };
-  const recovered=applyRecovery(join(root,'workers.json'), {version:1,invocations:1,workers:[record]}, record, socketPath, adapter);
+  const recovered=applyRecovery(join(root,'workers.json'), {version:1,invocations:1,workers:[record]}, record, {kind:'tmux',id:socketPath}, adapter);
   assert.equal(recovered.record.surface,pane);
   writeFileSync(waitFile,'go\n');
   const deadline=Date.now()+5000;

@@ -19,6 +19,7 @@ import {
   canAutoClose,
   canonicalizeSessionFile,
   classifyHost,
+  closeCompleted,
   closeOwned,
   diagnoseText,
   dispatcherPath,
@@ -1268,7 +1269,7 @@ function hostForAttempt(record: AttemptRecord): WorkerHost {
   const adapter = getLifecycleAdapter();
   if (adapter.workerHost) return adapter.workerHost(record.host);
   if (record.host.kind === "tmux") return new TmuxWorkerHost(record.host.id, adapter);
-  if (record.host.kind === "herdr") return new HerdrWorkerHost(record.host.id, null, record.host.terminalId, adapter);
+  if (record.host.kind === "herdr") return new HerdrWorkerHost(record.host.id, record.host.terminalId, adapter);
   throw new Error(`Unsupported worker host: ${(record.host as { kind: string }).kind}`);
 }
 
@@ -1509,7 +1510,7 @@ async function launchSubagentImpl(
     completionFile,
     host,
     container,
-    hostLaunch: { cwd: targetCwdForSession, env },
+    hostLaunch: { cwd: targetCwdForSession, ...(host.identity.kind === "herdr" ? { callerPane: parentPane } : {}) },
     requested,
     interactive: effectiveInteractive,
     paneStartCommand: freezePaneStartCommand(launchScriptFile),
@@ -1774,7 +1775,9 @@ async function watchSubagent(
       }
       if (!foreign && canAutoClose(record, sawExit, record.outcome != null)) {
         try {
-          const closed = closeOwned(registryFile, workerRegistry, record);
+          const closed = record.host.kind === "herdr"
+            ? closeCompleted(registryFile, workerRegistry, record)
+            : closeOwned(registryFile, workerRegistry, record);
           commitRegistry(closed.registry, closed.record, running);
           runningSubagents.delete(running.id);
           break;
@@ -1790,17 +1793,6 @@ async function watchSubagent(
             const next = persistRecord(registryFile, workerRegistry, absent);
             commitRegistry(next, absent, running);
             record = absent;
-            runningSubagents.delete(running.id);
-            break;
-          }
-          // A Herdr script returns to the pane shell after its exit receipt,
-          // intentionally erasing the only live argv ownership witness.
-          // Retain that pane as unknown rather than retrying a forbidden close.
-          if (record.host.kind === "herdr" && recovered.kind === "unknown") {
-            const retained: AttemptRecord = { ...record, resourceState: "unknown", watcherDiagnostic: recovered.reason };
-            const next = persistRecord(registryFile, workerRegistry, retained);
-            commitRegistry(next, retained, running);
-            record = retained;
             runningSubagents.delete(running.id);
             break;
           }
@@ -2365,7 +2357,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
           completionFile,
           host,
           container,
-          hostLaunch: { cwd: ctx.cwd, env },
+          hostLaunch: { cwd: ctx.cwd, ...(host.identity.kind === "herdr" ? { callerPane: parentPane } : {}) },
           requested,
           interactive,
           paneStartCommand: freezePaneStartCommand(launchScriptFile),
