@@ -1123,6 +1123,101 @@ describe("watchSubagent() real async polling path: failure and diagnostic persis
   });
 });
 
+describe("Herdr watcher lifecycle", () => {
+  it("auto-closes four completed workers and admits a fifth", async () => {
+    const root = mkdtempSync(join(tmpdir(), "pi-herdr-watcher-"));
+    const previous = {
+      tmux: process.env.TMUX,
+      tmuxPane: process.env.TMUX_PANE,
+      herdrSocket: process.env.HERDR_SOCKET_PATH,
+      herdrPane: process.env.HERDR_PANE_ID,
+    };
+    const panes = new Map<string, { terminalId: string; script: string | null }>();
+    const splitCalls: string[][] = [];
+    const closeCalls: string[] = [];
+    const { api, handlers, tools, notifications } = makeApi();
+    const parentSessionId = randomUUID();
+    const parentSessionFile = join(root, "parent.jsonl");
+    writeFileSync(parentSessionFile, JSON.stringify({ type: "session", id: parentSessionId }) + "\n");
+    const ctx = makeCtx({ cwd: root, sessionDir: join(root, "sessions"), parentSessionId, parentSessionFile, notifications });
+    let nextPane = 0;
+    const adapter = {
+      ...createDefaultAdapter(),
+      herdr(args: string[]) {
+        if (args[0] !== "pane") throw new Error(`unexpected herdr ${args.join(" ")}`);
+        if (args[1] === "get") {
+          const pane = args[2];
+          const worker = panes.get(pane);
+          return JSON.stringify({ result: { pane: { pane_id: pane, terminal_id: worker?.terminalId ?? "parent-terminal", tab_id: "w1:t1" } } });
+        }
+        if (args[1] === "split") {
+          splitCalls.push([...args]);
+          const pane = `w1:p${++nextPane}`;
+          panes.set(pane, { terminalId: `term-${nextPane}`, script: null });
+          return JSON.stringify({ result: { pane: { pane_id: pane, terminal_id: `term-${nextPane}`, tab_id: "w1:t1" } } });
+        }
+        if (args[1] === "run") {
+          const worker = panes.get(args[2]);
+          if (!worker) throw new Error("run without split");
+          worker.script = args[4];
+          return "";
+        }
+        if (args[1] === "process-info") {
+          const pane = args[3];
+          const worker = panes.get(pane);
+          return JSON.stringify({ result: { process_info: { pane_id: pane, foreground_processes: worker?.script ? [{ argv: ["bash", worker.script] }] : [] } } });
+        }
+        if (args[1] === "close") {
+          closeCalls.push(args[2]);
+          panes.delete(args[2]);
+          return "";
+        }
+        if (args[1] === "list") {
+          return JSON.stringify({ result: { panes: [...panes.entries()].map(([pane, worker]) => ({ pane_id: pane, terminal_id: worker.terminalId, tab_id: "w1:t1" })) } });
+        }
+        throw new Error(`unexpected herdr ${args.join(" ")}`);
+      },
+    };
+    const complete = async (attemptId: string) => {
+      const running = testApiOf().runningSubagents.get(attemptId);
+      assert.ok(running, "worker must be watched before receipts arrive");
+      const childId = randomUUID();
+      const identity = { version: 1, attemptId, token: running.attempt.completionToken, sessionFile: running.attempt.sessionFile };
+      writeFileSync(`${running.completionFile}.start`, JSON.stringify({ ...identity, kind: "startup", piSessionId: childId, observed: { provider: "xai", model: "grok-4.6", thinking: "high" } }));
+      writeFileSync(running.completionFile, JSON.stringify({ ...identity, type: "done", piSessionId: childId, summary: "complete" }));
+      writeFileSync(`${running.completionFile}.exit`, JSON.stringify({ ...identity, kind: "shell-exit", exitCode: 0, piSessionId: childId }));
+      await waitFor(() => !testApiOf().runningSubagents.has(attemptId));
+    };
+    try {
+      delete process.env.TMUX;
+      delete process.env.TMUX_PANE;
+      process.env.HERDR_SOCKET_PATH = "/tmp/pi-herdr-watcher.sock";
+      process.env.HERDR_PANE_ID = "w1:p0";
+      setLifecycleAdapter(adapter);
+      subagentsModule.default(api);
+      fireOnly(handlers, "session_start", { reason: "startup" }, ctx);
+      for (let index = 0; index < 4; index += 1) {
+        const result = await tools.subagent.execute(`tc${index}`, { name: `worker-${index}`, task: "finish" }, undefined, undefined, ctx);
+        assert.equal(result.details.status, "started");
+        await complete(result.details.id);
+      }
+      const fifth = await tools.subagent.execute("tc5", { name: "worker-5", task: "finish" }, undefined, undefined, ctx);
+      assert.equal(fifth.details.status, "started");
+      assert.deepEqual(splitCalls[0], ["pane", "split", "--pane", "w1:p0", "--direction", "right", "--cwd", root, "--no-focus"]);
+      assert.equal(closeCalls.length, 4);
+      await complete(fifth.details.id);
+    } finally {
+      shutdownExtension(handlers, ctx);
+      setLifecycleAdapter(null);
+      if (previous.tmux === undefined) delete process.env.TMUX; else process.env.TMUX = previous.tmux;
+      if (previous.tmuxPane === undefined) delete process.env.TMUX_PANE; else process.env.TMUX_PANE = previous.tmuxPane;
+      if (previous.herdrSocket === undefined) delete process.env.HERDR_SOCKET_PATH; else process.env.HERDR_SOCKET_PATH = previous.herdrSocket;
+      if (previous.herdrPane === undefined) delete process.env.HERDR_PANE_ID; else process.env.HERDR_PANE_ID = previous.herdrPane;
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
 // ════════════════════════════════════════════════════════════════════════
 // Per-session invocation limit: asks the user, persists, can be removed
 // ════════════════════════════════════════════════════════════════════════

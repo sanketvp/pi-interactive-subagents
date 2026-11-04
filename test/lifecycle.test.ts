@@ -12,7 +12,6 @@ import {
   invokeSplit,
   releaseWithoutClose,
   closeOwned,
-  closeCompleted,
   applyRecovery,
   applyStartupReceipt,
   freezePaneStartCommand,
@@ -193,7 +192,7 @@ test('Herdr preserves split evidence before a failed run and recovers it as unkn
   assert.equal(result.record.host.terminalId, 'term-1');
 });
 
-test('Herdr closes a completed worker using its authenticated receipt and terminal identity', () => {
+test('Herdr closes a completed worker only with terminal and argv proof', () => {
   const root = tempRoot();
   const socket = '/tmp/herdr.sock';
   const calls: string[][] = [];
@@ -202,6 +201,7 @@ test('Herdr closes a completed worker using its authenticated receipt and termin
     herdr(args: string[]) {
       calls.push(args);
       if (args[1] === 'get') return JSON.stringify({ result: { pane: { pane_id: 'w1:p2', terminal_id: 'term-1', tab_id: 'w1:t1' } } });
+      if (args[1] === 'process-info') return JSON.stringify({ result: { process_info: { pane_id: 'w1:p2', foreground_processes: [{ argv: ['bash', join(root, 'launch.sh')] }] } } });
       if (args[1] === 'close') return '';
       throw new Error(`unexpected herdr ${args.join(' ')}`);
     }, now: () => 1,
@@ -213,9 +213,9 @@ test('Herdr closes a completed worker using its authenticated receipt and termin
     host, container: 'w1:t1', requested: { provider: 'xai', model: 'grok-4.6', thinking: 'high' }, interactive: false,
   }, adapter);
   const running = { ...began.record, surface: 'w1:p2', resourceState: 'running' as const };
-  const closed = closeCompleted(join(root, 'workers.json'), began.registry, running, adapter);
+  const closed = closeOwned(join(root, 'workers.json'), began.registry, running, adapter);
   assert.equal(closed.record.resourceState, 'closed');
-  assert.deepEqual(calls, [['pane', 'get', 'w1:p2'], ['pane', 'close', 'w1:p2']]);
+  assert.deepEqual(calls, [['pane', 'get', 'w1:p2'], ['pane', 'process-info', '--pane', 'w1:p2'], ['pane', 'close', 'w1:p2']]);
 });
 
 test('detects Herdr only with both required environment variables and keeps tmux fallback', () => {
@@ -364,7 +364,6 @@ test('lifecycle uses the WorkerHost contract rather than direct tmux operations'
     clearOwnership() { calls.push('clear'); },
     killOwned() { calls.push('kill'); },
     interruptOwned() { calls.push('interrupt'); },
-    closeCompleted() { calls.push('close-completed'); },
   };
   const adapter = { ...createDefaultAdapter(), workerHost: () => host, tmux() { throw new Error('direct tmux call'); }, now: () => 1 };
   const began = persistPreparingIntent({ registryPath: join(root, 'workers.json'), registry: { version: 1, invocations: 0, workers: [] }, name: 'w', task: 't', parentSessionId: randomUUID(), sessionFile: join(root, 's.jsonl'), launchScriptFile: '/tmp/launch.sh', completionFile: join(root, 'done.json'), host, container: '@0', requested: { provider: 'xai', model: 'grok-4.6', thinking: 'high' }, interactive: false }, adapter);
@@ -494,6 +493,7 @@ test('launch script is argv array with no eval and unique wx path', () => {
   assert.match(body, /dispatch_args=\(/);
   assert.doesNotMatch(body, /\beval\b/);
   assert.match(body, /@pi-attempt/);
+  assert.match(body, /while :; do sleep 3600; done/);
   assert.equal(existsSync(script), true);
 });
 

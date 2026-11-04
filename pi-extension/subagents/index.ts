@@ -19,7 +19,6 @@ import {
   canAutoClose,
   canonicalizeSessionFile,
   classifyHost,
-  closeCompleted,
   closeOwned,
   diagnoseText,
   dispatcherPath,
@@ -1719,6 +1718,7 @@ async function watchSubagent(
   }
   const foreign = classifyHost(record, currentWorkerHostIdentity()) === "foreign";
   let sawExit = false;
+  let failedAutoCloses = 0;
   try {
     while (!signal.aborted && watcherIsCurrent(running)) {
       record = running.attempt ?? record;
@@ -1775,24 +1775,30 @@ async function watchSubagent(
       }
       if (!foreign && canAutoClose(record, sawExit, record.outcome != null)) {
         try {
-          const closed = record.host.kind === "herdr"
-            ? closeCompleted(registryFile, workerRegistry, record)
-            : closeOwned(registryFile, workerRegistry, record);
+          const closed = closeOwned(registryFile, workerRegistry, record);
           commitRegistry(closed.registry, closed.record, running);
           runningSubagents.delete(running.id);
           break;
         } catch {
-          // Token mismatch or unreachable socket: retain. BUT if the pane is
-          // provably gone from its recorded window (the worker shell exited
-          // on its own and tmux reaped the pane -- the normal case once an
-          // authenticated exit receipt exists), record it as `proven_absent`
-          // and stop, instead of retrying kill-pane every poll forever.
           const recovered = recoverSurface(record);
           if (recovered.kind === "proven_absent") {
             const absent: AttemptRecord = { ...record, resourceState: "proven_absent" };
             const next = persistRecord(registryFile, workerRegistry, absent);
             commitRegistry(next, absent, running);
             record = absent;
+            runningSubagents.delete(running.id);
+            break;
+          }
+          failedAutoCloses += 1;
+          if (failedAutoCloses >= 5) {
+            const retained: AttemptRecord = {
+              ...record,
+              resourceState: "unknown",
+              watcherDiagnostic: "Worker pane could not be closed after 5 attempts; retaining pane",
+            };
+            const next = persistRecord(registryFile, workerRegistry, retained);
+            commitRegistry(next, retained, running);
+            record = retained;
             runningSubagents.delete(running.id);
             break;
           }

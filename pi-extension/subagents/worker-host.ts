@@ -27,7 +27,6 @@ export interface WorkerHost {
   clearOwnership(surface: string): void;
   killOwned(surface: string, attemptId: string, token: string, launchScript?: string): void;
   interruptOwned(surface: string, attemptId: string, token: string, launchScript?: string): void;
-  closeCompleted(surface: string, attemptId: string, token: string, launchScript?: string): void;
 }
 
 function tmuxArgs(socket: string, args: string[]): string[] {
@@ -102,10 +101,6 @@ export class TmuxWorkerHost implements WorkerHost {
   interruptOwned(surface: string, attemptId: string, token: string): void {
     if (!this.ownsSurface(surface, attemptId, token)) throw new Error("Worker pane ownership changed; retaining pane");
     this.tmux(["send-keys", "-t", surface, "Escape"]);
-  }
-
-  closeCompleted(surface: string, attemptId: string, token: string, launchScript?: string): void {
-    this.killOwned(surface, attemptId, token, launchScript);
   }
 
   private tmux(args: string[]): string {
@@ -249,13 +244,6 @@ export class HerdrWorkerHost implements WorkerHost {
   interruptOwned(surface: string, attemptId: string, token: string, launchScript?: string): void {
     if (!this.ownsSurface(surface, attemptId, token, launchScript)) throw new Error("Worker pane ownership changed; retaining pane");
     this.herdr(["pane", "send-keys", surface, "esc"]);
-  }
-
-  closeCompleted(surface: string, _attemptId: string, _token: string, _launchScript?: string): void {
-    if (!this.identity.terminalId) throw new Error("Worker pane ownership changed; retaining pane");
-    const pane = paneFromResponse(this.herdr(["pane", "get", surface]), "pane get");
-    if (pane.terminal_id !== this.identity.terminalId) throw new Error("Worker pane ownership changed; retaining pane");
-    this.herdr(["pane", "close", surface]);
   }
 
   private herdr(args: string[]): string {
