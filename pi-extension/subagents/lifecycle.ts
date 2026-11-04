@@ -212,6 +212,7 @@ export function writeLaunchScript(input: LaunchScriptInput, adapter = getLifecyc
     `${bashSingleQuote(process.execPath)} ${bashSingleQuote(completionCli)} ${bashSingleQuote(input.env.PI_SUBAGENT_COMPLETION_FILE)} ${bashSingleQuote(input.attemptId)} ${bashSingleQuote(input.token)} ${bashSingleQuote(input.env.PI_SUBAGENT_SESSION)} "$worker_exit"`,
   );
   if (input.holdOpenAfterExit) lines.push("while :; do sleep 3600; done");
+  else lines.push('exit "$worker_exit"');
   adapter.fs.mkdirSync(dirname(input.scriptPath), { recursive: true, mode: 0o700 });
   adapter.fs.writeFileSync(input.scriptPath, lines.join("\n") + "\n", { mode: 0o600, flag: "wx" });
   return freezePaneStartCommand(input.scriptPath);

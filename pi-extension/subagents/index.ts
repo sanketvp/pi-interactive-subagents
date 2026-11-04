@@ -58,7 +58,6 @@ import {
 import { homedir } from "node:os";
 import {
   isMuxAvailable,
-  sendEscape,
   renameCurrentTab,
   renameWorkspace,
 } from "./cmux.ts";
@@ -965,7 +964,7 @@ function resolveInterruptTarget(params: { id?: string; name?: string }):
 /**
  * Interrupt must only ever send Escape to an exact, currently owned tmux
  * pane (`%N`) on the CURRENT tmux socket. An empty, malformed, or
- * foreign-socket surface must never reach `sendEscapeKey` -- e.g. an empty
+ * foreign-socket surface must never reach the host -- e.g. an empty
  * string target on tmux's `send-keys` falls back to the default/active
  * pane, which could hit an unrelated pane.
  */
@@ -989,10 +988,7 @@ function isExactOwnedSurface(running: RunningSubagent): boolean {
   return !!ownedWorkerHost(running);
 }
 
-function requestSubagentInterrupt(
-  running: RunningSubagent,
-  sendEscapeKey: (surface: string) => void = sendEscape,
-): { ok: true } | { error: string } {
+function requestSubagentInterrupt(running: RunningSubagent): { ok: true } | { error: string } {
   const host = ownedWorkerHost(running);
   if (!host) {
     return {
@@ -1002,15 +998,7 @@ function requestSubagentInterrupt(
     };
   }
   try {
-    // The generic cmux helper selects from ambient mux state.  A recorded
-    // tmux worker must instead target its own socket through the host.
-    if (host.identity.kind === "tmux" && sendEscapeKey === sendEscape) {
-      host.interruptOwned(running.surface, running.attempt!.attemptId, running.attempt!.completionToken, running.attempt!.launchScriptFile);
-    } else if (host.identity.kind === "tmux") {
-      sendEscapeKey(running.surface);
-    } else {
-      host.interruptOwned(running.surface, running.attempt!.attemptId, running.attempt!.completionToken, running.attempt!.launchScriptFile);
-    }
+    host.interruptOwned(running.surface, running.attempt!.attemptId, running.attempt!.completionToken, running.attempt!.launchScriptFile);
     return { ok: true };
   } catch (error: any) {
     return {
@@ -1021,10 +1009,7 @@ function requestSubagentInterrupt(
   }
 }
 
-function handleSubagentInterrupt(
-  params: { id?: string; name?: string },
-  sendEscapeKey: (surface: string) => void = sendEscape,
-) {
+function handleSubagentInterrupt(params: { id?: string; name?: string }) {
   const resolved = resolveInterruptTarget(params);
   if ("error" in resolved) {
     return {
@@ -1048,7 +1033,7 @@ function handleSubagentInterrupt(
   const now = Date.now();
   observeRunningSubagent(running, now);
 
-  const interruption = requestSubagentInterrupt(running, sendEscapeKey);
+  const interruption = requestSubagentInterrupt(running);
   if ("error" in interruption) {
     return {
       content: [{ type: "text" as const, text: interruption.error }],

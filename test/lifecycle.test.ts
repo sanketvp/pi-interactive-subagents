@@ -1,6 +1,7 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {mkdtempSync,writeFileSync,readFileSync,mkdirSync,existsSync} from 'node:fs';
+import {execFileSync, spawn, spawnSync} from 'node:child_process';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {randomUUID} from 'node:crypto';
@@ -502,35 +503,50 @@ test('startup receipt helper fails loudly without ctx.model/getSessionId/thinkin
   assert.equal(ok.observed.provider, 'xai');
 });
 
-test('launch script is argv array with no eval and unique wx path', () => {
+test('launch scripts preserve tmux exit status and keep Herdr ownership live after the exit receipt', async () => {
   const root = tempRoot();
   const adapter = createDefaultAdapter();
   const script = join(root, 'w.sh');
+  const completionFile = join(root, 'done.json');
+  const attemptId = randomUUID();
+  const token = randomUUID();
   writeLaunchScript({
     scriptPath: script,
-    attemptId: randomUUID(),
-    token: randomUUID(),
-    ownershipPreamble: new TmuxWorkerHost('/tmp/sock', adapter).ownershipPreamble('attempt', 'token'),
-    dispatcher: '/bin/echo',
-    dispatcherArgs: ['--interactive', '--provider', 'xai', '--', '$(touch /tmp/should-not)'],
+    attemptId,
+    token,
+    ownershipPreamble: 'true',
+    dispatcher: '/bin/sh',
+    dispatcherArgs: ['-c', 'exit "$1"', 'worker', '37'],
     env: {
-      PI_SUBAGENT_COMPLETION_FILE: join(root, 'done.json'),
+      PI_SUBAGENT_COMPLETION_FILE: completionFile,
       PI_SUBAGENT_SESSION: join(root, 's.jsonl'),
     },
   }, adapter);
-  const body = readFileSync(script, 'utf8');
-  assert.match(body, /dispatch_args=\(/);
-  assert.doesNotMatch(body, /\beval\b/);
-  assert.match(body, /@pi-attempt/);
-  assert.doesNotMatch(body, /while :; do sleep 3600; done/, 'tmux scripts still exit after the receipt');
+  const tmux = spawnSync('bash', [script]);
+  assert.equal(tmux.status, 37);
+  assert.equal(JSON.parse(readFileSync(`${completionFile}.exit`, 'utf8')).exitCode, 37);
+  assert.throws(() => writeLaunchScript({
+    scriptPath: script, attemptId, token, ownershipPreamble: 'true', dispatcher: '/bin/true', dispatcherArgs: [],
+    env: { PI_SUBAGENT_COMPLETION_FILE: completionFile, PI_SUBAGENT_SESSION: join(root, 's.jsonl') },
+  }, adapter), /EEXIST/);
+
   const herdrScript = join(root, 'herdr.sh');
+  const herdrCompletionFile = join(root, 'h-done.json');
   writeLaunchScript({
     scriptPath: herdrScript, attemptId: randomUUID(), token: randomUUID(), ownershipPreamble: 'true',
-    dispatcher: '/bin/echo', dispatcherArgs: [], env: { PI_SUBAGENT_COMPLETION_FILE: join(root, 'h-done.json'), PI_SUBAGENT_SESSION: join(root, 'h.jsonl') },
+    dispatcher: '/bin/true', dispatcherArgs: [], env: { PI_SUBAGENT_COMPLETION_FILE: herdrCompletionFile, PI_SUBAGENT_SESSION: join(root, 'h.jsonl') },
     holdOpenAfterExit: true,
   }, adapter);
-  assert.match(readFileSync(herdrScript, 'utf8'), /while :; do sleep 3600; done/);
-  assert.equal(existsSync(script), true);
+  const herdr = spawn('bash', [herdrScript], { stdio: 'ignore' });
+  const deadline = Date.now() + 5_000;
+  while (!existsSync(`${herdrCompletionFile}.exit`) && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  assert.equal(existsSync(`${herdrCompletionFile}.exit`), true);
+  assert.equal(herdr.exitCode, null, 'Herdr bash remains live after its authenticated exit receipt');
+  assert.equal(execFileSync('ps', ['-o', 'comm=', '-p', String(herdr.pid)], { encoding: 'utf8' }).trim(), 'bash');
+  herdr.kill('SIGTERM');
+  await new Promise<void>((resolve) => herdr.once('exit', () => resolve()));
 });
 
 // ── P1-3: preparing-with-no-surface recovery is proven_absent, zero tmux calls ──
