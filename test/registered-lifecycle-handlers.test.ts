@@ -19,7 +19,7 @@ import {
   realpathSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { createDefaultAdapter, setLifecycleAdapter } from "../pi-extension/subagents/adapter.ts";
@@ -1159,7 +1159,9 @@ describe("Herdr watcher lifecycle", () => {
         if (args[1] === "run") {
           const worker = panes.get(args[2]);
           if (!worker) throw new Error("run without split");
-          worker.script = args[4];
+          // pane run types into a shell, which removes the quoting used for a
+          // launch-script path containing spaces before bash observes argv[1].
+          worker.script = args[4].startsWith("'") ? args[4].slice(1, -1).replace(/'\\''/g, "'") : args[4];
           return "";
         }
         if (args[1] === "process-info") {
@@ -1182,6 +1184,7 @@ describe("Herdr watcher lifecycle", () => {
       const running = testApiOf().runningSubagents.get(attemptId);
       assert.ok(running, "worker must be watched before receipts arrive");
       const childId = randomUUID();
+      mkdirSync(dirname(running.completionFile), { recursive: true });
       const identity = { version: 1, attemptId, token: running.attempt.completionToken, sessionFile: running.attempt.sessionFile };
       writeFileSync(`${running.completionFile}.start`, JSON.stringify({ ...identity, kind: "startup", piSessionId: childId, observed: { provider: "xai", model: "grok-4.6", thinking: "high" } }));
       writeFileSync(running.completionFile, JSON.stringify({ ...identity, type: "done", piSessionId: childId, summary: "complete" }));

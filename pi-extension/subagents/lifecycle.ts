@@ -176,6 +176,8 @@ export interface LaunchScriptInput {
   cwd?: string;
   preamble?: string;
   waitFile?: string;
+  /** Herdr needs bash to remain foreground until the authenticated close. */
+  holdOpenAfterExit?: boolean;
 }
 
 function bashSingleQuote(value: string): string {
@@ -209,7 +211,7 @@ export function writeLaunchScript(input: LaunchScriptInput, adapter = getLifecyc
   lines.push(
     `${bashSingleQuote(process.execPath)} ${bashSingleQuote(completionCli)} ${bashSingleQuote(input.env.PI_SUBAGENT_COMPLETION_FILE)} ${bashSingleQuote(input.attemptId)} ${bashSingleQuote(input.token)} ${bashSingleQuote(input.env.PI_SUBAGENT_SESSION)} "$worker_exit"`,
   );
-  lines.push("while :; do sleep 3600; done");
+  if (input.holdOpenAfterExit) lines.push("while :; do sleep 3600; done");
   adapter.fs.mkdirSync(dirname(input.scriptPath), { recursive: true, mode: 0o700 });
   adapter.fs.writeFileSync(input.scriptPath, lines.join("\n") + "\n", { mode: 0o600, flag: "wx" });
   return freezePaneStartCommand(input.scriptPath);
@@ -337,6 +339,7 @@ export function releaseWithoutClose(
   record: AttemptRecord,
   adapter = getLifecycleAdapter(),
 ): { registry: WorkerRegistry; record: AttemptRecord } {
+  if (!LIVE_RESOURCE_STATES.has(record.resourceState)) throw new Error("Cannot release a non-live attempt");
   if (!record.surface) throw new Error("Cannot release an attempt with no surface");
   const host = hostFor(record, adapter);
   if (!host.ownsSurface(record.surface, record.attemptId, record.completionToken, record.launchScriptFile)) throw new Error("Worker pane ownership changed; retaining pane");
@@ -352,6 +355,7 @@ export function closeOwned(
   record: AttemptRecord,
   adapter = getLifecycleAdapter(),
 ): { registry: WorkerRegistry; record: AttemptRecord } {
+  if (!LIVE_RESOURCE_STATES.has(record.resourceState)) throw new Error("Cannot close a non-live attempt");
   if (!record.surface) throw new Error("Cannot close an attempt with no surface");
   hostFor(record, adapter).killOwned(record.surface, record.attemptId, record.completionToken, record.launchScriptFile);
   const nextRecord: AttemptRecord = { ...record, resourceState: "closed" };

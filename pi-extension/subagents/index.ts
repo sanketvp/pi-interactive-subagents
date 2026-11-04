@@ -1002,8 +1002,15 @@ function requestSubagentInterrupt(
     };
   }
   try {
-    if (host.identity.kind === "tmux") sendEscapeKey(running.surface);
-    else host.interruptOwned(running.surface, running.attempt!.attemptId, running.attempt!.completionToken, running.attempt!.launchScriptFile);
+    // The generic cmux helper selects from ambient mux state.  A recorded
+    // tmux worker must instead target its own socket through the host.
+    if (host.identity.kind === "tmux" && sendEscapeKey === sendEscape) {
+      host.interruptOwned(running.surface, running.attempt!.attemptId, running.attempt!.completionToken, running.attempt!.launchScriptFile);
+    } else if (host.identity.kind === "tmux") {
+      sendEscapeKey(running.surface);
+    } else {
+      host.interruptOwned(running.surface, running.attempt!.attemptId, running.attempt!.completionToken, running.attempt!.launchScriptFile);
+    }
     return { ok: true };
   } catch (error: any) {
     return {
@@ -1536,6 +1543,7 @@ async function launchSubagentImpl(
     dispatcherArgs,
     env,
     cwd: effectiveCwd ?? undefined,
+    holdOpenAfterExit: host.identity.kind === "herdr",
     preamble: [`Subagent launch script for ${params.name}`, `Session: ${subagentSessionFile}`].join("\n"),
   }, adapter);
   const splitReady = persistSplitRequested(registryFile, began.registry, began.record, freezePaneStartCommand(launchScriptFile), adapter);
@@ -2387,6 +2395,7 @@ export default function subagentsExtension(pi: ExtensionAPI) {
           dispatcher: dispatcherPath(),
           dispatcherArgs,
           env,
+          holdOpenAfterExit: host.identity.kind === "herdr",
           preamble: [`Subagent resume script for ${name}`, `Session: ${canonicalSession}`].join("\n"),
         }, adapter);
         const splitReady = persistSplitRequested(registryFile, began.registry, began.record, freezePaneStartCommand(launchScriptFile), adapter);

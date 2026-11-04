@@ -148,6 +148,10 @@ function panesFromResponse(output: string): HerdrPane[] {
   return panes.filter((pane): pane is HerdrPane => !!pane && typeof pane === "object" && !Array.isArray(pane));
 }
 
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
 function foregroundArgv(output: string, pane: string): string[][] {
   const parsed = herdrJson(output, "pane process-info");
   const result = parsed.result;
@@ -200,7 +204,9 @@ export class HerdrWorkerHost implements WorkerHost {
   }
 
   runLaunch(surface: string, launchScript: string): void {
-    this.herdr(["pane", "run", surface, "bash", launchScript]);
+    // Herdr types its argv into a shell.  Quote only the script operand so a
+    // session directory containing spaces still yields bash's exact argv.
+    this.herdr(["pane", "run", surface, "bash", shellQuote(launchScript)]);
   }
 
   listSurfaces(container: string): WorkerSurfaceEvidence[] {

@@ -115,7 +115,10 @@ test('Herdr ownership requires the captured terminal id and exact live bash argv
   assert.deepEqual(calls[0], ['pane', 'split', '--pane', 'w1:p1', '--direction', 'right', '--cwd', '/tmp', '--no-focus']);
   assert.equal(calls.some((args) => args.some((arg) => arg.includes('PI_SUBAGENT_TOKEN'))), false);
   host.runLaunch('w1:p2', script);
-  assert.deepEqual(calls[1], ['pane', 'run', 'w1:p2', 'bash', script]);
+  assert.deepEqual(calls[1], ['pane', 'run', 'w1:p2', 'bash', `'${script}'`]);
+  const spaced = '/tmp/session with space/launch.sh';
+  host.runLaunch('w1:p2', spaced);
+  assert.deepEqual(calls[2], ['pane', 'run', 'w1:p2', 'bash', `'${spaced}'`]);
 
   const recovered = new HerdrWorkerHost(socket, 'term-original', adapter);
   assert.equal(recovered.ownsSurface('w1:p2', 'attempt', 'token', script), true);
@@ -216,6 +219,32 @@ test('Herdr closes a completed worker only with terminal and argv proof', () => 
   const closed = closeOwned(join(root, 'workers.json'), began.registry, running, adapter);
   assert.equal(closed.record.resourceState, 'closed');
   assert.deepEqual(calls, [['pane', 'get', 'w1:p2'], ['pane', 'process-info', '--pane', 'w1:p2'], ['pane', 'close', 'w1:p2']]);
+});
+
+test('tmux interrupt targets the recorded socket instead of ambient cmux state', () => {
+  const calls: string[][] = [];
+  const adapter = mockAdapter({ calls, tmux(args) {
+    if (args.includes('show-options')) return 'token';
+    return '';
+  } });
+  new TmuxWorkerHost('/tmp/recorded.sock', adapter).interruptOwned('%7', 'attempt', 'token');
+  assert.deepEqual(calls, [
+    ['-S', '/tmp/recorded.sock', 'show-options', '-p', '-v', '-t', '%7', '--', '@pi-worker-token'],
+    ['-S', '/tmp/recorded.sock', 'send-keys', '-t', '%7', 'Escape'],
+  ]);
+});
+
+test('close and release refuse records that are no longer live', () => {
+  const root = tempRoot();
+  const adapter = mockAdapter({ tmux() { throw new Error('must not touch a non-live pane'); } });
+  const began = persistPreparingIntent({
+    registryPath: join(root, 'workers.json'), registry: { version: 1, invocations: 0, workers: [] }, name: 'w', task: 't', parentSessionId: randomUUID(),
+    sessionFile: join(root, 's.jsonl'), launchScriptFile: join(root, 'launch.sh'), completionFile: join(root, 'done.json'),
+    host: new TmuxWorkerHost('/tmp/sock', adapter), container: '@0', requested: { provider: 'xai', model: 'grok-4.6', thinking: 'high' }, interactive: false,
+  }, adapter);
+  const released = { ...began.record, surface: '%1', resourceState: 'released' as const };
+  assert.throws(() => releaseWithoutClose(join(root, 'workers.json'), began.registry, released, adapter), /non-live/);
+  assert.throws(() => closeOwned(join(root, 'workers.json'), began.registry, released, adapter), /non-live/);
 });
 
 test('detects Herdr only with both required environment variables and keeps tmux fallback', () => {
@@ -493,7 +522,14 @@ test('launch script is argv array with no eval and unique wx path', () => {
   assert.match(body, /dispatch_args=\(/);
   assert.doesNotMatch(body, /\beval\b/);
   assert.match(body, /@pi-attempt/);
-  assert.match(body, /while :; do sleep 3600; done/);
+  assert.doesNotMatch(body, /while :; do sleep 3600; done/, 'tmux scripts still exit after the receipt');
+  const herdrScript = join(root, 'herdr.sh');
+  writeLaunchScript({
+    scriptPath: herdrScript, attemptId: randomUUID(), token: randomUUID(), ownershipPreamble: 'true',
+    dispatcher: '/bin/echo', dispatcherArgs: [], env: { PI_SUBAGENT_COMPLETION_FILE: join(root, 'h-done.json'), PI_SUBAGENT_SESSION: join(root, 'h.jsonl') },
+    holdOpenAfterExit: true,
+  }, adapter);
+  assert.match(readFileSync(herdrScript, 'utf8'), /while :; do sleep 3600; done/);
   assert.equal(existsSync(script), true);
 });
 
