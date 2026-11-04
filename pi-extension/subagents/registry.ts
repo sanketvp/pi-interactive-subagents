@@ -95,6 +95,8 @@ export interface AttemptRecord {
   completionToken: string;
   host: WorkerHostIdentity;
   container: string;
+  /** Herdr split parameters persisted before the non-atomic CLI launch. */
+  hostLaunch?: { cwd: string; callerPane?: string };
   surface: string | null;
   sessionFile: string;
   launchScriptFile: string;
@@ -197,11 +199,25 @@ function validateAttemptRecord(worker: unknown, index: number): AttemptRecord {
   if (w.host !== undefined) {
     if (!w.host || typeof w.host !== "object") fail("host");
     const host = w.host as Record<string, unknown>;
-    if (host.kind !== "tmux" || !isAbsolutePath(host.id)) fail("host");
+    if (!isAbsolutePath(host.id)) fail("host");
+    if (host.kind === "tmux") {
+      if (host.terminalId !== undefined) fail("host");
+    } else if (host.kind === "herdr") {
+      if (host.terminalId !== undefined && !isNonEmptyString(host.terminalId, 256)) fail("host");
+    } else {
+      fail("host");
+    }
   }
+  const host = (w.host ?? { kind: "tmux" }) as Record<string, unknown>;
   const container = w.container ?? legacyWindowId;
-  if (typeof container !== "string" || !WINDOW_RE.test(container)) fail("container");
-  if (w.surface !== null && (typeof w.surface !== "string" || !PANE_RE.test(w.surface))) fail("surface");
+  if (typeof container !== "string" || (host.kind === "tmux" ? !WINDOW_RE.test(container) : !isNonEmptyString(container, 256))) fail("container");
+  if (w.surface !== null && (typeof w.surface !== "string" || (host.kind === "tmux" ? !PANE_RE.test(w.surface) : !isNonEmptyString(w.surface, 256)))) fail("surface");
+  if (host.kind === "herdr" && w.surface !== null && !isNonEmptyString(host.terminalId, 256)) fail("host");
+  if (w.hostLaunch !== undefined) {
+    if (!w.hostLaunch || typeof w.hostLaunch !== "object" || Array.isArray(w.hostLaunch)) fail("hostLaunch");
+    const launch = w.hostLaunch as Record<string, unknown>;
+    if (!isAbsolutePath(launch.cwd) || (launch.callerPane !== undefined && !isNonEmptyString(launch.callerPane, 256))) fail("hostLaunch");
+  }
   if (!isAbsolutePath(w.sessionFile)) fail("sessionFile");
   if (!isAbsolutePath(w.launchScriptFile)) fail("launchScriptFile");
   if (!isAbsolutePath(w.completionFile)) fail("completionFile");

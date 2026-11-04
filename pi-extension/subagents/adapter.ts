@@ -12,7 +12,7 @@ import {
 import { execFileSync } from "node:child_process";
 import type { WorkerHost, WorkerHostIdentity } from "./worker-host.ts";
 
-export type TmuxFn = (args: string[]) => string;
+export type MuxFn = (args: string[]) => string;
 
 export interface LifecycleFs {
   readFileSync: typeof readFileSync;
@@ -92,7 +92,9 @@ export function createNoopProcAdapter(): ProcAdapter {
 }
 
 export interface LifecycleAdapter {
-  tmux: TmuxFn;
+  tmux: MuxFn;
+  /** Herdr is always invoked as an argv array, never through a shell string. */
+  herdr: MuxFn;
   /** Test/runtime injection seam for backend-neutral lifecycle operations. */
   workerHost?: (identity: WorkerHostIdentity) => WorkerHost;
   fs: LifecycleFs;
@@ -106,6 +108,9 @@ export function createDefaultAdapter(): LifecycleAdapter {
   return {
     tmux(args: string[]): string {
       return execFileSync("tmux", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+    },
+    herdr(args: string[]): string {
+      return execFileSync("herdr", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
     },
     fs: {
       readFileSync,

@@ -10,6 +10,21 @@ import { createDefaultAdapter, setLifecycleAdapter } from "../pi-extension/subag
 import { visibleWidth } from "@earendil-works/pi-tui";
 import * as subagentsModule from "../pi-extension/subagents/index.ts";
 
+const inheritedHerdrEnv = {
+  pane: process.env.HERDR_PANE_ID,
+  socket: process.env.HERDR_SOCKET_PATH,
+};
+before(() => {
+  delete process.env.HERDR_PANE_ID;
+  delete process.env.HERDR_SOCKET_PATH;
+});
+after(() => {
+  if (inheritedHerdrEnv.pane === undefined) delete process.env.HERDR_PANE_ID;
+  else process.env.HERDR_PANE_ID = inheritedHerdrEnv.pane;
+  if (inheritedHerdrEnv.socket === undefined) delete process.env.HERDR_SOCKET_PATH;
+  else process.env.HERDR_SOCKET_PATH = inheritedHerdrEnv.socket;
+});
+
 import {
   getLeafId,
   getNewEntries,
@@ -1890,16 +1905,23 @@ describe("subagent interruption", () => {
   // other pane/query fails (proving no other tmux call should occur).
   const FAKE_TOKEN = "fake-owned-token";
   let previousTmux: string | undefined;
+  let failInterrupt = false;
+  const tmuxCalls: string[][] = [];
   before(() => {
     previousTmux = process.env.TMUX;
     process.env.TMUX = `${TEST_SOCKET},0,0`;
     setLifecycleAdapter({
       ...createDefaultAdapter(),
       tmux(args: string[]) {
+        tmuxCalls.push([...args]);
         if (args.includes("show-options")) {
           const t = args[args.indexOf("-t") + 1];
           if (t === "%1") return FAKE_TOKEN;
           throw new Error(`no such pane: ${t}`);
+        }
+        if (args.includes("send-keys")) {
+          if (failInterrupt) throw new Error("mux write failed");
+          return "";
         }
         throw new Error(`unexpected tmux call in interrupt tests: ${args.join(" ")}`);
       },
@@ -1976,9 +1998,9 @@ describe("subagent interruption", () => {
       },
     });
 
-    const result = testApi.requestSubagentInterrupt(running, () => {
-      throw new Error("mux write failed");
-    });
+    failInterrupt = true;
+    const result = testApi.requestSubagentInterrupt(running);
+    failInterrupt = false;
 
     assert.match(result.error, /Failed to send Escape/);
     assert.equal(aborted, false);
@@ -1987,29 +2009,30 @@ describe("subagent interruption", () => {
 
   it("refuses interrupt and issues zero tmux calls for an empty/foreign/malformed surface", () => {
     const testApi = (subagentsModule as any).__test__;
-    let calls = 0;
-    const bump = () => { calls += 1; };
+    const start = tmuxCalls.length;
 
-    const empty = testApi.requestSubagentInterrupt(makeRunning({ surface: "" }), bump);
+    const empty = testApi.requestSubagentInterrupt(makeRunning({ surface: "" }));
     assert.match(empty.error, /Refusing to interrupt/);
 
-    const malformed = testApi.requestSubagentInterrupt(makeRunning({ surface: "pane-1" }), bump);
+    const malformed = testApi.requestSubagentInterrupt(makeRunning({ surface: "pane-1" }));
     assert.match(malformed.error, /Refusing to interrupt/);
 
     const foreignSocket = testApi.requestSubagentInterrupt(
       makeRunning({ attempt: makeAttempt({ host: { kind: "tmux", id: "/tmp/some-other-socket" } }) }),
-      bump,
     );
     assert.match(foreignSocket.error, /Refusing to interrupt/);
 
-    const noAttempt = testApi.requestSubagentInterrupt(makeRunning({ attempt: undefined }), bump);
+    const noAttempt = testApi.requestSubagentInterrupt(makeRunning({ attempt: undefined }));
     assert.match(noAttempt.error, /Refusing to interrupt/);
 
-    assert.equal(calls, 0, "no tmux call should have been issued for any invalid surface");
+    assert.equal(tmuxCalls.length, start, "no tmux call should have been issued for any invalid surface");
 
-    const valid = testApi.requestSubagentInterrupt(makeRunning(), bump);
+    const valid = testApi.requestSubagentInterrupt(makeRunning());
     assert.deepEqual(valid, { ok: true });
-    assert.equal(calls, 1);
+    assert.deepEqual(tmuxCalls.slice(start), [
+      ['-S', TEST_SOCKET, 'show-options', '-p', '-v', '-t', '%1', '--', '@pi-worker-token'],
+      ['-S', TEST_SOCKET, 'send-keys', '-t', '%1', 'Escape'],
+    ]);
   });
 
   it("refuses interrupt when the pane's live ownership tag does not match the record, despite a well-formed %N surface on the current socket", () => {
@@ -2020,22 +2043,21 @@ describe("subagent interruption", () => {
     // refused with zero Escape sends, exactly like release/close already
     // require exact-token ownership before mutating a pane.
     const testApi = (subagentsModule as any).__test__;
-    let calls = 0;
-    const bump = () => { calls += 1; };
+    const start = tmuxCalls.length;
 
-    const wrongToken = testApi.requestSubagentInterrupt(makeRunning({ attempt: makeAttempt({ completionToken: "not-the-real-token" }) }), bump);
+    const wrongToken = testApi.requestSubagentInterrupt(makeRunning({ attempt: makeAttempt({ completionToken: "not-the-real-token" }) }));
     assert.match(wrongToken.error, /Refusing to interrupt/);
-    assert.equal(calls, 0);
+    assert.equal(tmuxCalls.slice(start).some((args) => args.includes('send-keys')), false);
 
-    const noToken = testApi.requestSubagentInterrupt(makeRunning({ attempt: makeAttempt({ completionToken: undefined }) }), bump);
+    const noToken = testApi.requestSubagentInterrupt(makeRunning({ attempt: makeAttempt({ completionToken: undefined }) }));
     assert.match(noToken.error, /Refusing to interrupt/);
-    assert.equal(calls, 0);
+    assert.equal(tmuxCalls.slice(start).some((args) => args.includes('send-keys')), false);
 
     // A record whose surface matches format+socket but points at an
     // untracked pane (readPaneToken throws "no such pane") is refused too.
-    const untrackedPane = testApi.requestSubagentInterrupt(makeRunning({ surface: "%99" }), bump);
+    const untrackedPane = testApi.requestSubagentInterrupt(makeRunning({ surface: "%99" }));
     assert.match(untrackedPane.error, /Refusing to interrupt/);
-    assert.equal(calls, 0);
+    assert.equal(tmuxCalls.slice(start).some((args) => args.includes('send-keys')), false);
   });
 
   it("leaves status unchanged when Escape delivery fails in the tool path", () => {
@@ -2061,9 +2083,9 @@ describe("subagent interruption", () => {
     try {
       runningMap.set("a1", makeRunning({ statusState: activeState }));
 
-      const result = withMockedNow(20_000, () => testApi.handleSubagentInterrupt({ name: "Worker" }, () => {
-        throw new Error("mux write failed");
-      }));
+      failInterrupt = true;
+      const result = withMockedNow(20_000, () => testApi.handleSubagentInterrupt({ name: "Worker" }));
+      failInterrupt = false;
 
       assert.match(result.content[0].text, /Failed to send Escape/);
       assert.equal(classifyStatus(runningMap.get("a1").statusState, 20_000).kind, "active");
@@ -2075,7 +2097,6 @@ describe("subagent interruption", () => {
   it("sends Escape without aborting or mutating running state", () => {
     const testApi = (subagentsModule as any).__test__;
     let aborted = false;
-    let sentSurface = "";
     const running = makeRunning({
       abortController: {
         abort() {
@@ -2084,12 +2105,9 @@ describe("subagent interruption", () => {
       },
     });
 
-    const result = testApi.requestSubagentInterrupt(running, (surface: string) => {
-      sentSurface = surface;
-    });
+    const result = testApi.requestSubagentInterrupt(running);
 
     assert.deepEqual(result, { ok: true });
-    assert.equal(sentSurface, "%1");
     assert.equal(aborted, false);
     assert.equal("interruptRequested" in running, false);
   });
@@ -2097,7 +2115,6 @@ describe("subagent interruption", () => {
   it("refreshes the latest activity snapshot before forcing local interrupt waiting", () => {
     const testApi = (subagentsModule as any).__test__;
     const runningMap = testApi.runningSubagents as Map<string, any>;
-    let sentSurface = "";
     runningMap.clear();
 
     withTempDir((dir) => {
@@ -2127,11 +2144,8 @@ describe("subagent interruption", () => {
           statusState: createStatusState({ source: "pi", startTimeMs: 0 }),
         }));
 
-        withMockedNow(20_000, () => testApi.handleSubagentInterrupt({ name: "Worker" }, (surface: string) => {
-          sentSurface = surface;
-        }));
+        withMockedNow(20_000, () => testApi.handleSubagentInterrupt({ name: "Worker" }));
 
-        assert.equal(sentSurface, "%1");
         const state = runningMap.get("a1").statusState;
         const snapshot = classifyStatus(state, 20_000);
         assert.equal(snapshot.kind, "waiting");
@@ -2148,7 +2162,6 @@ describe("subagent interruption", () => {
   it("acknowledges Pi-backed interrupt requests and forces local status waiting", () => {
     const testApi = (subagentsModule as any).__test__;
     const runningMap = testApi.runningSubagents as Map<string, any>;
-    let sentSurface = "";
     runningMap.clear();
 
     const activeState = observeStatus(
@@ -2169,11 +2182,10 @@ describe("subagent interruption", () => {
     try {
       runningMap.set("a1", makeRunning({ statusState: activeState }));
 
-      const result = withMockedNow(20_000, () => testApi.handleSubagentInterrupt({ name: "Worker" }, (surface: string) => {
-        sentSurface = surface;
-      }));
+      const start = tmuxCalls.length;
+      const result = withMockedNow(20_000, () => testApi.handleSubagentInterrupt({ name: "Worker" }));
 
-      assert.equal(sentSurface, "%1");
+      assert.equal(tmuxCalls.slice(start).filter((args) => args.includes('send-keys')).length, 1);
       assert.equal(result.content[0].text, 'Interrupt requested for subagent "Worker".');
       assert.deepEqual(result.details, { id: "a1", name: "Worker", status: "interrupt_requested" });
       const snapshot = classifyStatus(runningMap.get("a1").statusState, 20_000);
@@ -2188,20 +2200,16 @@ describe("subagent interruption", () => {
   it("sends Escape again for repeated interrupt requests", () => {
     const testApi = (subagentsModule as any).__test__;
     const runningMap = testApi.runningSubagents as Map<string, any>;
-    const surfaces: string[] = [];
     runningMap.clear();
 
     try {
       runningMap.set("a1", makeRunning());
 
-      testApi.handleSubagentInterrupt({ name: "Worker" }, (surface: string) => {
-        surfaces.push(surface);
-      });
-      testApi.handleSubagentInterrupt({ name: "Worker" }, (surface: string) => {
-        surfaces.push(surface);
-      });
+      const start = tmuxCalls.length;
+      testApi.handleSubagentInterrupt({ name: "Worker" });
+      testApi.handleSubagentInterrupt({ name: "Worker" });
 
-      assert.deepEqual(surfaces, ["%1", "%1"]);
+      assert.equal(tmuxCalls.slice(start).filter((args) => args.includes('send-keys')).length, 2);
       assert.equal(runningMap.has("a1"), true);
     } finally {
       runningMap.clear();
@@ -2211,17 +2219,15 @@ describe("subagent interruption", () => {
   it("rejects Claude-backed interrupt requests before delivery", () => {
     const testApi = (subagentsModule as any).__test__;
     const runningMap = testApi.runningSubagents as Map<string, any>;
-    let delivered = false;
     runningMap.clear();
 
     try {
       runningMap.set("a1", makeRunning({ cli: "claude" }));
 
-      const result = testApi.handleSubagentInterrupt({ name: "Worker" }, () => {
-        delivered = true;
-      });
+      const start = tmuxCalls.length;
+      const result = testApi.handleSubagentInterrupt({ name: "Worker" });
 
-      assert.equal(delivered, false);
+      assert.equal(tmuxCalls.length, start);
       assert.match(result.content[0].text, /currently supported only for Pi-backed subagents/i);
       assert.deepEqual(result.details, {
         error: "claude interrupt unsupported",
