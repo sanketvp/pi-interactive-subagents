@@ -27,20 +27,20 @@ export const REGISTRY_VERSION = 1;
 /** v2 is unreadable by v1: `validateRegistry` requires version === 1. */
 export const REGISTRY_VERSION_V2 = 2 as const;
 export const MAX_LIVE_RESOURCES = 4;
-export const MAX_CHILD_INVOCATIONS = 12; // default per-lifecycle budget
-export const HARD_INVOCATION_CEILING = 100_000; // sanity bound for stored counters when the limit is raised/removed
+const LEGACY_DEFAULT_INVOCATION_LIMIT = 12;
+export const HARD_INVOCATION_CEILING = 100_000; // sanity bound for stored counters when a limit is set
 
 /**
- * Effective invocation limit for a registry. `invocationLimit` is a per-session
- * override persisted in workers.json: a positive integer raises/lowers the
- * budget, `null` removes the limit for that session permanently, absent means
- * the default. Set only through the user-confirmed /subagent-limit flow.
+ * Effective invocation limit for a registry. Sessions are unlimited unless a
+ * person explicitly sets a positive per-session limit through /subagent-limit.
+ * Unmarked persisted 12 values are the retired default and remain unlimited.
  */
-export function effectiveInvocationLimit(registry: { invocationLimit?: unknown } | null | undefined): number | null {
+export function effectiveInvocationLimit(registry: { invocationLimit?: unknown; invocationLimitSetByUser?: unknown } | null | undefined): number | null {
   const v = registry?.invocationLimit;
   if (v === null) return null;
+  if (v === LEGACY_DEFAULT_INVOCATION_LIMIT && registry?.invocationLimitSetByUser !== true) return null;
   if (Number.isInteger(v) && (v as number) > 0) return v as number;
-  return MAX_CHILD_INVOCATIONS;
+  return null;
 }
 export const MAX_PATH_LENGTH = 4096;
 
@@ -271,6 +271,9 @@ export function validateRegistry(data: unknown): WorkerRegistry {
   if (raw.invocationLimit !== undefined && raw.invocationLimit !== null &&
       (!Number.isInteger(raw.invocationLimit) || (raw.invocationLimit as number) < 1 || (raw.invocationLimit as number) > HARD_INVOCATION_CEILING)) {
     throw new RegistryValidationError("invocationLimit must be null (no limit) or a positive integer");
+  }
+  if (raw.invocationLimitSetByUser !== undefined && typeof raw.invocationLimitSetByUser !== "boolean") {
+    throw new RegistryValidationError("invocationLimitSetByUser must be a boolean");
   }
   if (!Array.isArray(raw.workers)) throw new RegistryValidationError("workers must be an array");
   const workers = raw.workers.map((worker, index) => validateAttemptRecord(worker, index));
@@ -682,6 +685,9 @@ export function validateRegistryV2(data: unknown): WorkerRegistryV2 {
   ) {
     throw new RegistryValidationError("invocationLimit must be null (no limit) or a positive integer");
   }
+  if (raw.invocationLimitSetByUser !== undefined && typeof raw.invocationLimitSetByUser !== "boolean") {
+    throw new RegistryValidationError("invocationLimitSetByUser must be a boolean");
+  }
   if (!Array.isArray(raw.workers)) throw new RegistryValidationError("workers must be an array");
   const workers = raw.workers.map((worker, index) => validateAttemptRecordV2(worker, index));
   const attemptIds = new Set<string>();
@@ -742,6 +748,7 @@ export function migrateV1toV2(v1: WorkerRegistry, opts?: { gating?: Gating }): W
     revision: 0,
     invocations: v1.invocations,
     invocationLimit: v1.invocationLimit as number | null | undefined,
+    invocationLimitSetByUser: v1.invocationLimitSetByUser as boolean | undefined,
     workers: v1.workers as WorkerRegistryV2["workers"],
     review,
   };

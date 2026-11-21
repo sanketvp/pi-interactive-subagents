@@ -8,7 +8,7 @@ import {execFileSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 import {writeCompletion,validateCompletion,writeStartupReceipt} from '../pi-extension/subagents/completion.mjs';
 import {loadRegistry,writeRegistry,RegistryValidationError,effectiveInvocationLimit} from '../pi-extension/subagents/registry.ts';
-import {persistOutcomePending,persistDeliveryAttempted,assertCanLaunch} from '../pi-extension/subagents/lifecycle.ts';
+import {persistOutcomePending,persistDeliveryAttempted,assertCanLaunch,diagnoseText} from '../pi-extension/subagents/lifecycle.ts';
 import {setLifecycleAdapter,createDefaultAdapter} from '../pi-extension/subagents/adapter.ts';
 
 const cli=fileURLToPath(new URL('../pi-extension/subagents/completion.mjs',import.meta.url));
@@ -124,18 +124,21 @@ test('strict registry validation fail-closed; extra keys preserved; invocation l
  const invalid=loadRegistry(path);
  assert.equal(invalid.status,'invalid');
  assert.equal(readFileSync(path,'utf8'),'not JSON');
- // Default limit 12 is enforced at LAUNCH time, not storage time: a raised
- // limit must be storable, and invocationLimit is validated.
- writeRegistry(path,13,[worker],{invocationLimit:20});
+ // Invocation limits are opt-in. Old unmarked 12 values are retired defaults,
+ // while a value set through /subagent-limit remains enforceable.
+ writeRegistry(path,13,[worker],{invocationLimit:20,invocationLimitSetByUser:true});
  const raised=loadRegistry(path);
  assert.equal(raised.status,'ok');
  assert.equal(effectiveInvocationLimit(raised.registry),20);
  assert.doesNotThrow(()=>assertCanLaunch({...raised.registry,workers:[]}));
- assert.throws(()=>assertCanLaunch({version:1,invocations:12,workers:[]}),/Invocation budget reached \(12\/12/);
- assert.throws(()=>assertCanLaunch({version:1,invocations:20,workers:[],invocationLimit:20}),/Invocation budget reached/);
+ assert.doesNotThrow(()=>assertCanLaunch({version:1,invocations:500,workers:[]}));
+ assert.doesNotThrow(()=>assertCanLaunch({version:1,invocations:500,workers:[],invocationLimit:12}),'legacy default is unlimited');
+ assert.throws(()=>assertCanLaunch({version:1,invocations:12,workers:[],invocationLimit:12,invocationLimitSetByUser:true}),/Invocation budget reached \(12\/12/);
+ assert.throws(()=>assertCanLaunch({version:1,invocations:20,workers:[],invocationLimit:20,invocationLimitSetByUser:true}),/Invocation budget reached/);
  assert.doesNotThrow(()=>assertCanLaunch({version:1,invocations:500,workers:[],invocationLimit:null}),'null removes the limit');
  assert.equal(effectiveInvocationLimit({invocationLimit:null}),null);
- assert.equal(effectiveInvocationLimit({}),12);
+ assert.equal(effectiveInvocationLimit({}),null);
+ assert.match(diagnoseText({status:'missing',registry:{version:1,invocations:0,workers:[]}},[]),/Invocations: 0\/unlimited/);
  assert.throws(()=>writeRegistry(path,1,[worker],{invocationLimit:0}),RegistryValidationError);
  assert.throws(()=>writeRegistry(path,1,[worker],{invocationLimit:'lots'}),RegistryValidationError);
  assert.throws(()=>writeRegistry(path,100_001,[worker],{invocationLimit:null}),RegistryValidationError);
