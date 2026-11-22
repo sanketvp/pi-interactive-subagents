@@ -533,8 +533,8 @@ export function diagnoseText(
     lines.push(`File bytes preserved (${load.raw.length} bytes).`);
   } else {
     lines.push(`Registry status: ${load.status}`);
-    const invocations = load.status === "missing" ? 0 : load.registry.invocations;
-    const lim = load.status === "missing" ? null : effectiveInvocationLimit(load.registry);
+    const invocations = load.registry.invocations;
+    const lim = effectiveInvocationLimit(load.registry);
     lines.push(`Invocations: ${invocations}/${lim === null ? "unlimited" : lim}`);
     lines.push(`Live resources: ${countLiveResources(records)}/${MAX_LIVE_RESOURCES}`);
   }

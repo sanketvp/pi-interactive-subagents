@@ -35,7 +35,6 @@ export const HARD_INVOCATION_CEILING = 100_000; // sanity bound for stored count
  */
 export function effectiveInvocationLimit(registry: { invocationLimit?: unknown; invocationLimitSetByUser?: unknown } | null | undefined): number | null {
   const v = registry?.invocationLimit;
-  if (v === null) return null;
   if (registry?.invocationLimitSetByUser === true && Number.isInteger(v) && (v as number) > 0) return v as number;
   return null;
 }
