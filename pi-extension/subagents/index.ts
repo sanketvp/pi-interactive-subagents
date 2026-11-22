@@ -629,40 +629,34 @@ function persistWorkers() {
   persistRegistry(registryFile, { ...workerRegistry, invocations: invocationCount });
 }
 /**
- * Per-session invocation limit control. The default budget (12) can be raised,
- * lowered, or removed for THIS session only, and only through an explicit
- * user answer in the TUI — never by the model. Persisted in workers.json so it
- * survives /reload and resume.
+ * Per-session invocation limits are opt-in, set only through an explicit user
+ * answer in the TUI, and persisted in workers.json across /reload and resume.
  */
 function currentLimitLabel(): string {
   const lim = effectiveInvocationLimit(workerRegistry);
-  return lim === null ? "no limit (removed for this session)" : `${lim}`;
+  return lim === null ? "unlimited" : `${lim}`;
 }
 function setInvocationLimit(next: number | null): void {
-  workerRegistry = { ...workerRegistry, invocationLimit: next };
+  workerRegistry = { ...workerRegistry, invocationLimit: next, invocationLimitSetByUser: true };
   persistWorkers();
   updateWidget();
 }
 async function promptInvocationLimit(ctx: ExtensionContext, why: string): Promise<boolean> {
   if (ctx.mode !== "tui" || !ctx.ui?.select) return false;
   const used = invocationCount;
+  const limit = effectiveInvocationLimit(workerRegistry);
   const choice = await ctx.ui.select(
     `${why}\nUsed ${used} of ${currentLimitLabel()} subagent invocations this session. What do you want to do?`,
-    [
-      "Raise by 4",
-      "Raise by 12",
-      "Set a specific limit…",
-      "Remove the limit for this session (permanent)",
-      "Keep the limit — do not launch",
-    ],
+    limit === null
+      ? ["Set a specific limit…", "Keep unlimited"]
+      : ["Raise by 4", "Raise by 12", "Set a specific limit…", "Remove the limit for this session", "Keep the limit"],
   );
   if (!choice || choice.startsWith("Keep")) return false;
-  const lim = effectiveInvocationLimit(workerRegistry);
-  const base = lim === null ? used : Math.max(lim, used);
+  const base = limit === null ? used : Math.max(limit, used);
   if (choice === "Raise by 4") setInvocationLimit(base + 4);
   else if (choice === "Raise by 12") setInvocationLimit(base + 12);
   else if (choice.startsWith("Remove")) {
-    const sure = await ctx.ui.confirm("Remove the invocation limit for this session?", "Permanent for this session (until you set a new limit with /subagent-limit).");
+    const sure = await ctx.ui.confirm("Remove the invocation limit for this session?", "You can set a new limit later with /subagent-limit.");
     if (!sure) return false;
     setInvocationLimit(null);
   } else {
@@ -674,19 +668,10 @@ async function promptInvocationLimit(ctx: ExtensionContext, why: string): Promis
   ctx.ui.notify(`Subagent invocation limit for this session: ${currentLimitLabel()}`, "info");
   return true;
 }
-async function withLaunchReservation<T>(launch: () => Promise<T>, ctx?: ExtensionContext): Promise<T> {
+async function withLaunchReservation<T>(launch: () => Promise<T>): Promise<T> {
   if (!registryReady) throw new Error("Worker registry is not initialized or failed validation; refusing launch");
   if (process.env.PI_SUBAGENT_ID) throw new Error("Nested worker spawning is disabled");
-  try {
-    assertCanLaunch({ ...workerRegistry, invocations: invocationCount });
-  } catch (err: any) {
-    const msg = String(err?.message ?? err);
-    // Only the invocation budget is user-adjustable; the live-worker cap is not.
-    if (!/Invocation budget reached/.test(msg) || !ctx) throw err;
-    const raised = await promptInvocationLimit(ctx, "The subagent invocation budget for this session is used up.");
-    if (!raised) throw new Error(`${msg} The user chose to keep the limit; do not retry the launch.`);
-    assertCanLaunch({ ...workerRegistry, invocations: invocationCount });
-  }
+  assertCanLaunch({ ...workerRegistry, invocations: invocationCount });
   return await launch();
 }
 
@@ -1356,8 +1341,7 @@ function startWidgetRefresh() {
  * Call watchSubagent() on the returned object to observe completion.
  */
 async function launchSubagent(...args: Parameters<typeof launchSubagentImpl>): Promise<RunningSubagent> {
-  // args[1] is the ExtensionContext for the launching tool call.
-  return withLaunchReservation(() => launchSubagentImpl(...args), args[1] as ExtensionContext | undefined);
+  return withLaunchReservation(() => launchSubagentImpl(...args));
 }
 async function launchSubagentImpl(
   params: typeof SubagentParams.static,

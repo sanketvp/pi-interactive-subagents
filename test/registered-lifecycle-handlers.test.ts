@@ -1222,7 +1222,7 @@ describe("Herdr watcher lifecycle", () => {
 });
 
 // ════════════════════════════════════════════════════════════════════════
-// Per-session invocation limit: asks the user, persists, can be removed
+// Per-session invocation limit: opt-in, persists, can be removed
 // ════════════════════════════════════════════════════════════════════════
 describe("adjustable invocation limit", () => {
   function seedAtLimit(root: string, invocations: number, extra: Record<string, unknown> = {}) {
@@ -1233,9 +1233,8 @@ describe("adjustable invocation limit", () => {
     writeFileSync(registryPath, JSON.stringify({ version: 1, invocations, workers: [], ...extra }));
     return { parentSessionId, sessionDir, registryPath };
   }
-  // The budget check runs after the mux-availability check, so pretend to be
-  // inside a (non-existent) tmux server: the budget path is reached first and,
-  // if the budget is raised, the launch then fails at the tmux stage instead.
+  // Pretend to be inside a (non-existent) tmux server so launches that pass
+  // admission fail only after reaching the tmux stage.
   function fakeTmux<T>(run: () => Promise<T>): Promise<T> {
     const prev = { TMUX: process.env.TMUX, TMUX_PANE: process.env.TMUX_PANE };
     process.env.TMUX = "/tmp/pi-limit-fake-sock,0,0";
@@ -1259,81 +1258,73 @@ describe("adjustable invocation limit", () => {
     });
   }
 
-  it("at the default limit, refuses when the user keeps the limit (no launch, nothing changed)", async () => {
-    const root = mkdtempSync(join(tmpdir(), "pi-limit-keep-"));
-    const seeded = seedAtLimit(root, 12);
-    const asked: string[] = [];
-    let r: Awaited<ReturnType<typeof launchWith>> | undefined;
-    try {
-      r = await launchWith(root, seeded, { select: async (title: string) => { asked.push(title); return "Keep the limit — do not launch"; } });
-      assert.equal(asked.length, 1, "the user must be asked exactly once");
-      assert.match(asked[0], /Used 12 of 12/);
-      assert.match(String(r.result.thrown ?? r.result.content?.[0]?.text ?? ""), /budget reached.*chose to keep the limit/i);
-      const reg = loadRegistry(seeded.registryPath);
-      assert.equal(reg.status, "ok");
-      assert.equal(reg.status === "ok" ? reg.registry.invocations : -1, 12);
-      assert.equal(reg.status === "ok" ? reg.registry.invocationLimit : "x", undefined);
-    } finally { if (r) shutdownExtension(r.handlers, r.ctx); rmSync(root, { recursive: true, force: true }); }
-  });
+  for (const limit of [16, 24]) {
+    it(`an unmarked legacy limit of ${limit} is unlimited and never prompts at launch`, async () => {
+      const root = mkdtempSync(join(tmpdir(), "pi-limit-default-"));
+      const seeded = seedAtLimit(root, limit, { invocationLimit: limit });
+      const asked: string[] = [];
+      let r: Awaited<ReturnType<typeof launchWith>> | undefined;
+      try {
+        r = await launchWith(root, seeded, { select: async (title: string) => { asked.push(title); return "Keep unlimited"; } });
+        assert.equal(asked.length, 0, "launches do not prompt for an invocation budget");
+        const text = String(r.result.thrown ?? r.result.content?.[0]?.text ?? "");
+        assert.doesNotMatch(text, /Invocation budget reached/);
+        assert.match(text, /tmux/, "launch proceeded to the tmux stage");
+      } finally { if (r) shutdownExtension(r.handlers, r.ctx); rmSync(root, { recursive: true, force: true }); }
+    });
+  }
 
-  it("'Raise by 4' persists invocationLimit=16 and lets the launch proceed past the old cap", async () => {
-    const root = mkdtempSync(join(tmpdir(), "pi-limit-raise-"));
+  it("/subagent-limit opt-in persists a finite invocation limit", async () => {
+    const root = mkdtempSync(join(tmpdir(), "pi-limit-set-"));
     const seeded = seedAtLimit(root, 12);
     let r: Awaited<ReturnType<typeof launchWith>> | undefined;
     try {
-      r = await launchWith(root, seeded, { select: async () => "Raise by 4" });
+      r = await launchWith(root, seeded, { select: async () => "Keep unlimited" });
+      r.ctx.ui.select = async () => "Set a specific limit…";
+      r.ctx.ui.input = async () => "16";
+      await r.commands["subagent-limit"].handler("", r.ctx);
       const reg = loadRegistry(seeded.registryPath);
       assert.equal(reg.status, "ok");
       assert.equal(reg.status === "ok" ? reg.registry.invocationLimit : null, 16);
-      // No tmux in this harness: the launch fails later at the mux stage, but it
-      // must have got PAST the budget check (i.e. not a budget error).
-      const text = String(r.result.thrown ?? r.result.content?.[0]?.text ?? "");
-      assert.doesNotMatch(text, /Invocation budget reached/);
-      assert.match(text, /tmux/, "launch proceeded to the tmux stage");
+      assert.equal(reg.status === "ok" ? reg.registry.invocationLimitSetByUser : null, true);
     } finally { if (r) shutdownExtension(r.handlers, r.ctx); rmSync(root, { recursive: true, force: true }); }
   });
 
-  it("'Remove the limit' requires a confirm, persists invocationLimit=null, and /subagent-limit reports it", async () => {
+  it("/subagent-limit removes an explicit limit after confirmation", async () => {
     const root = mkdtempSync(join(tmpdir(), "pi-limit-remove-"));
-    const seeded = seedAtLimit(root, 12);
+    const seeded = seedAtLimit(root, 16, { invocationLimit: 16, invocationLimitSetByUser: true });
     let r: Awaited<ReturnType<typeof launchWith>> | undefined;
     try {
       let confirms = 0;
-      r = await launchWith(root, seeded, {
-        select: async () => "Remove the limit for this session (permanent)",
-        confirm: async () => { confirms += 1; return true; },
-      });
+      r = await launchWith(root, seeded, { select: async () => "Keep the limit" });
+      r.ctx.ui.select = async () => "Remove the limit for this session";
+      r.ctx.ui.confirm = async () => { confirms += 1; return true; };
+      await r.commands["subagent-limit"].handler("", r.ctx);
       assert.equal(confirms, 1, "removal must be confirmed");
       const reg = loadRegistry(seeded.registryPath);
       assert.equal(reg.status === "ok" ? reg.registry.invocationLimit : "x", null);
-      // A later session reloading this registry sees no limit even at 500 invocations.
       const { assertCanLaunch } = await import("../pi-extension/subagents/lifecycle.ts");
       assert.doesNotThrow(() => assertCanLaunch({ ...(reg as any).registry, invocations: 500 }));
-      // /subagent-limit shows the state and, when the user keeps it, leaves it alone.
-      r.ctx.ui.select = async () => "Keep the limit — do not launch";
-      await r.commands["subagent-limit"].handler("", r.ctx);
-      assert.ok(r.notifications.some((n: any) => /no limit \(removed for this session\)/.test(String(n.text))), "notify must mention the removed limit");
+      assert.ok(r.notifications.some((n: any) => /unlimited/.test(String(n.text))), "notify must mention the unlimited state");
     } finally { if (r) shutdownExtension(r.handlers, r.ctx); rmSync(root, { recursive: true, force: true }); }
   });
 
-  it("the model cannot change the limit: a stored invocationLimit is only ever set through the UI prompt path", async () => {
-    const root = mkdtempSync(join(tmpdir(), "pi-limit-model-"));
-    const seeded = seedAtLimit(root, 12);
+  it("a reached explicit limit refuses a TUI launch without prompting", async () => {
+    const root = mkdtempSync(join(tmpdir(), "pi-limit-reached-"));
+    const seeded = seedAtLimit(root, 12, { invocationLimit: 12, invocationLimitSetByUser: true });
     let r: Awaited<ReturnType<typeof launchWith>> | undefined;
     try {
-      // Non-TUI context: no prompt possible -> hard refusal, limit untouched.
-      const { api, handlers, tools, notifications } = makeApi();
-      subagentsModule.default(api);
-      const ctx = makeCtx({ cwd: root, sessionDir: seeded.sessionDir, parentSessionId: seeded.parentSessionId, parentSessionFile: join(root, "parent.jsonl"), notifications });
-      (ctx as any).mode = "rpc";
-      fireOnly(handlers, "session_start", { reason: "startup" }, ctx);
-      let text = "";
-      try { const result = await fakeTmux(() => tools["subagent"].execute("tc1", { name: "w", task: "t" }, undefined, undefined, ctx)); text = String(result.content?.[0]?.text ?? ""); }
-      catch (err: any) { text = String(err?.message ?? err); }
-      assert.match(text, /Invocation budget reached|TUI parent/);
+      let promptCalls = 0;
+      r = await launchWith(root, seeded, {
+        select: async () => { promptCalls += 1; return "Keep the limit"; },
+        confirm: async () => { promptCalls += 1; return true; },
+        input: async () => { promptCalls += 1; return "16"; },
+      });
+      const text = String(r.result.thrown ?? r.result.content?.[0]?.text ?? "");
+      assert.match(text, /Invocation budget reached \(12\/12/);
+      assert.equal(promptCalls, 0, "a reached limit never opens a budget prompt");
       const reg = loadRegistry(seeded.registryPath);
-      assert.equal(reg.status === "ok" ? reg.registry.invocationLimit : "x", undefined);
-      shutdownExtension(handlers, ctx);
-    } finally { rmSync(root, { recursive: true, force: true }); }
+      assert.equal(reg.status === "ok" ? reg.registry.invocationLimit : "x", 12);
+    } finally { if (r) shutdownExtension(r.handlers, r.ctx); rmSync(root, { recursive: true, force: true }); }
   });
 });

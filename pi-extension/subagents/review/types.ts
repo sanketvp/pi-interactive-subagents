@@ -233,6 +233,7 @@ export interface WorkerRegistryV2 {
   revision: number;
   invocations: number;
   invocationLimit?: number | null;
+  invocationLimitSetByUser?: boolean;
   workers: Array<Record<string, unknown> & AttemptRecordV2Fields>;
   review: ReviewState;
 }

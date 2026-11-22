@@ -12,7 +12,6 @@ import {
   type ResourceState,
   type WorkerRegistry,
   LIVE_RESOURCE_STATES,
-  MAX_CHILD_INVOCATIONS,
   MAX_LIVE_RESOURCES,
   effectiveInvocationLimit,
   countLiveResources,
@@ -534,8 +533,9 @@ export function diagnoseText(
     lines.push(`File bytes preserved (${load.raw.length} bytes).`);
   } else {
     lines.push(`Registry status: ${load.status}`);
-    const lim = load.status === "missing" ? MAX_CHILD_INVOCATIONS : effectiveInvocationLimit(load.registry);
-    lines.push(`Invocations: ${load.status === "missing" ? 0 : load.registry.invocations}/${lim === null ? "unlimited (removed for this session)" : lim}`);
+    const invocations = load.registry.invocations;
+    const lim = effectiveInvocationLimit(load.registry);
+    lines.push(`Invocations: ${invocations}/${lim === null ? "unlimited" : lim}`);
     lines.push(`Live resources: ${countLiveResources(records)}/${MAX_LIVE_RESOURCES}`);
   }
   for (const record of records) {
@@ -552,5 +552,5 @@ export function diagnoseText(
   return lines.join("\n");
 }
 
-export { loadRegistry, RegistryValidationError, LIVE_RESOURCE_STATES, MAX_CHILD_INVOCATIONS, MAX_LIVE_RESOURCES };
+export { loadRegistry, RegistryValidationError, LIVE_RESOURCE_STATES, MAX_LIVE_RESOURCES };
 export type { LifecycleAdapter };
