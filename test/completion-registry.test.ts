@@ -124,15 +124,16 @@ test('strict registry validation fail-closed; extra keys preserved; invocation l
  const invalid=loadRegistry(path);
  assert.equal(invalid.status,'invalid');
  assert.equal(readFileSync(path,'utf8'),'not JSON');
- // Invocation limits are opt-in. Old unmarked 12 values are retired defaults,
- // while a value set through /subagent-limit remains enforceable.
+ // Invocation limits are opt-in, while a value set through /subagent-limit
+ // remains enforceable.
  writeRegistry(path,13,[worker],{invocationLimit:20,invocationLimitSetByUser:true});
  const raised=loadRegistry(path);
  assert.equal(raised.status,'ok');
  assert.equal(effectiveInvocationLimit(raised.registry),20);
  assert.doesNotThrow(()=>assertCanLaunch({...raised.registry,workers:[]}));
  assert.doesNotThrow(()=>assertCanLaunch({version:1,invocations:500,workers:[]}));
- assert.doesNotThrow(()=>assertCanLaunch({version:1,invocations:500,workers:[],invocationLimit:12}),'legacy default is unlimited');
+ assert.doesNotThrow(()=>assertCanLaunch({version:1,invocations:16,workers:[],invocationLimit:16}),'unmarked legacy limit is unlimited');
+ assert.doesNotThrow(()=>assertCanLaunch({version:1,invocations:24,workers:[],invocationLimit:24}),'unmarked legacy limit is unlimited');
  assert.throws(()=>assertCanLaunch({version:1,invocations:12,workers:[],invocationLimit:12,invocationLimitSetByUser:true}),/Invocation budget reached \(12\/12/);
  assert.throws(()=>assertCanLaunch({version:1,invocations:20,workers:[],invocationLimit:20,invocationLimitSetByUser:true}),/Invocation budget reached/);
  assert.doesNotThrow(()=>assertCanLaunch({version:1,invocations:500,workers:[],invocationLimit:null}),'null removes the limit');

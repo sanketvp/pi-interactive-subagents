@@ -27,19 +27,16 @@ export const REGISTRY_VERSION = 1;
 /** v2 is unreadable by v1: `validateRegistry` requires version === 1. */
 export const REGISTRY_VERSION_V2 = 2 as const;
 export const MAX_LIVE_RESOURCES = 4;
-const LEGACY_DEFAULT_INVOCATION_LIMIT = 12;
 export const HARD_INVOCATION_CEILING = 100_000; // sanity bound for stored counters when a limit is set
 
 /**
  * Effective invocation limit for a registry. Sessions are unlimited unless a
  * person explicitly sets a positive per-session limit through /subagent-limit.
- * Unmarked persisted 12 values are the retired default and remain unlimited.
  */
 export function effectiveInvocationLimit(registry: { invocationLimit?: unknown; invocationLimitSetByUser?: unknown } | null | undefined): number | null {
   const v = registry?.invocationLimit;
   if (v === null) return null;
-  if (v === LEGACY_DEFAULT_INVOCATION_LIMIT && registry?.invocationLimitSetByUser !== true) return null;
-  if (Number.isInteger(v) && (v as number) > 0) return v as number;
+  if (registry?.invocationLimitSetByUser === true && Number.isInteger(v) && (v as number) > 0) return v as number;
   return null;
 }
 export const MAX_PATH_LENGTH = 4096;

@@ -1258,19 +1258,21 @@ describe("adjustable invocation limit", () => {
     });
   }
 
-  it("an unmarked old default limit is unlimited and never prompts at launch", async () => {
-    const root = mkdtempSync(join(tmpdir(), "pi-limit-default-"));
-    const seeded = seedAtLimit(root, 12, { invocationLimit: 12 });
-    const asked: string[] = [];
-    let r: Awaited<ReturnType<typeof launchWith>> | undefined;
-    try {
-      r = await launchWith(root, seeded, { select: async (title: string) => { asked.push(title); return "Keep unlimited"; } });
-      assert.equal(asked.length, 0, "launches do not prompt for an invocation budget");
-      const text = String(r.result.thrown ?? r.result.content?.[0]?.text ?? "");
-      assert.doesNotMatch(text, /Invocation budget reached/);
-      assert.match(text, /tmux/, "launch proceeded to the tmux stage");
-    } finally { if (r) shutdownExtension(r.handlers, r.ctx); rmSync(root, { recursive: true, force: true }); }
-  });
+  for (const limit of [16, 24]) {
+    it(`an unmarked legacy limit of ${limit} is unlimited and never prompts at launch`, async () => {
+      const root = mkdtempSync(join(tmpdir(), "pi-limit-default-"));
+      const seeded = seedAtLimit(root, limit, { invocationLimit: limit });
+      const asked: string[] = [];
+      let r: Awaited<ReturnType<typeof launchWith>> | undefined;
+      try {
+        r = await launchWith(root, seeded, { select: async (title: string) => { asked.push(title); return "Keep unlimited"; } });
+        assert.equal(asked.length, 0, "launches do not prompt for an invocation budget");
+        const text = String(r.result.thrown ?? r.result.content?.[0]?.text ?? "");
+        assert.doesNotMatch(text, /Invocation budget reached/);
+        assert.match(text, /tmux/, "launch proceeded to the tmux stage");
+      } finally { if (r) shutdownExtension(r.handlers, r.ctx); rmSync(root, { recursive: true, force: true }); }
+    });
+  }
 
   it("/subagent-limit opt-in persists a finite invocation limit", async () => {
     const root = mkdtempSync(join(tmpdir(), "pi-limit-set-"));
@@ -1307,24 +1309,22 @@ describe("adjustable invocation limit", () => {
     } finally { if (r) shutdownExtension(r.handlers, r.ctx); rmSync(root, { recursive: true, force: true }); }
   });
 
-  it("a non-TUI launch cannot change an explicit limit", async () => {
-    const root = mkdtempSync(join(tmpdir(), "pi-limit-model-"));
+  it("a reached explicit limit refuses a TUI launch without prompting", async () => {
+    const root = mkdtempSync(join(tmpdir(), "pi-limit-reached-"));
     const seeded = seedAtLimit(root, 12, { invocationLimit: 12, invocationLimitSetByUser: true });
     let r: Awaited<ReturnType<typeof launchWith>> | undefined;
     try {
-      // Non-TUI context cannot change an explicitly configured limit.
-      const { api, handlers, tools, notifications } = makeApi();
-      subagentsModule.default(api);
-      const ctx = makeCtx({ cwd: root, sessionDir: seeded.sessionDir, parentSessionId: seeded.parentSessionId, parentSessionFile: join(root, "parent.jsonl"), notifications });
-      (ctx as any).mode = "rpc";
-      fireOnly(handlers, "session_start", { reason: "startup" }, ctx);
-      let text = "";
-      try { const result = await fakeTmux(() => tools["subagent"].execute("tc1", { name: "w", task: "t" }, undefined, undefined, ctx)); text = String(result.content?.[0]?.text ?? ""); }
-      catch (err: any) { text = String(err?.message ?? err); }
-      assert.match(text, /Invocation budget reached|TUI parent/);
+      let promptCalls = 0;
+      r = await launchWith(root, seeded, {
+        select: async () => { promptCalls += 1; return "Keep the limit"; },
+        confirm: async () => { promptCalls += 1; return true; },
+        input: async () => { promptCalls += 1; return "16"; },
+      });
+      const text = String(r.result.thrown ?? r.result.content?.[0]?.text ?? "");
+      assert.match(text, /Invocation budget reached \(12\/12/);
+      assert.equal(promptCalls, 0, "a reached limit never opens a budget prompt");
       const reg = loadRegistry(seeded.registryPath);
       assert.equal(reg.status === "ok" ? reg.registry.invocationLimit : "x", 12);
-      shutdownExtension(handlers, ctx);
-    } finally { rmSync(root, { recursive: true, force: true }); }
+    } finally { if (r) shutdownExtension(r.handlers, r.ctx); rmSync(root, { recursive: true, force: true }); }
   });
 });
